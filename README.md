@@ -1,20 +1,29 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+This is a Next.js app that accepts exported HTML chat/message files (e.g. Meta/Instagram exports), extracts message blocks into plain text, and lets you search + filter the results.
 
 ## Getting Started
 
-First, run the development server:
+Install dependencies and run the dev server:
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open http://localhost:3000.
+
+## How it works
+
+- Upload an `.html` file on the home page.
+- The server parses the HTML and extracts message blocks (sender, text, timestamp).
+- Parsed results are stored locally under `data/<fileId>/` (ignored by git).
+- Searches run server-side and support:
+	- Substring text search
+	- Sender filter
+	- Date range filter (via date inputs)
+
+## Notes
+
+- This is designed for local usage. If you deploy to a serverless environment (e.g. Vercel), writing to the local filesystem is not persistent.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

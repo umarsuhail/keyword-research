@@ -1,13 +1,12 @@
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --background: #0b0f14;
+  --foreground: #f2f4f8;
+  --muted: #a9b2c0;
+  --border: #243140;
+  --surface: #121922;
+  --surface-2: #0f141b;
+  --accent: #6aa6ff;
+  --accent-2: #a9ffef;
 }
 
 html,
@@ -31,12 +30,14 @@ body {
 }
 
 a {
-  color: inherit;
+  color: var(--accent);
   text-decoration: none;
 }
 
-@media (prefers-color-scheme: dark) {
-  html {
-    color-scheme: dark;
-  }
+html {
+  color-scheme: dark;
+}
+
+::selection {
+  background: rgba(106, 166, 255, 0.35);
 }
