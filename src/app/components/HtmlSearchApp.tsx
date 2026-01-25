@@ -1,6 +1,10 @@
 "use client";
 
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
+import { parseMessagesFromHtmlBrowser } from "@/lib/parseHtml.browser";
+import { searchMessages } from "@/lib/searchMessages";
+import { saveParsedFileBrowser } from "@/lib/storage.browser";
 
 type UploadMeta = {
   fileId: string;
@@ -30,6 +34,38 @@ type SearchApiResponse = {
   results: SearchHit[];
   error?: string;
 };
+
+function parseDateMs(value: string, mode: "start" | "end"): number | undefined {
+  if (!value) return undefined;
+
+  // Support <input type="date"> values (YYYY-MM-DD)
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const suffix = mode === "start" ? "T00:00:00.000" : "T23:59:59.999";
+    const ms = Date.parse(`${value}${suffix}`);
+    return Number.isNaN(ms) ? undefined : ms;
+  }
+
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? undefined : ms;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function highlightHtml(text: string, q: string): string {
+  const query = q.trim();
+  if (!query) return escapeHtml(text);
+
+  const safe = escapeHtml(text);
+  const re = new RegExp(escapeRegExp(escapeHtml(query)), "ig");
+  return safe.replace(re, (m) => `<mark>${m}</mark>`);
+}
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -107,6 +143,21 @@ export function HtmlSearchApp() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<"parsed" | "original" | "readable">("parsed");
 
+  const [messages, setMessages] = useState<
+    Array<{
+      id: string;
+      sender: string;
+      text: string;
+      textNorm: string;
+      timestampRaw: string;
+      timestampMs: number | null;
+    }>
+  >([]);
+  const [originalHtml, setOriginalHtml] = useState<string>("");
+
+  const originalObjectUrlRef = useRef<string | null>(null);
+  const readableObjectUrlRef = useRef<string | null>(null);
+
   const limit = 50;
 
   const canSearch = Boolean(fileId);
@@ -125,32 +176,28 @@ export function HtmlSearchApp() {
     setSelectedId(null);
 
     try {
-      const formData = new FormData();
-      formData.append("file", file);
+      const html = await file.text();
 
-      const res = await fetch("/api/upload", {
-        method: "POST",
-        body: formData,
-      });
-
-      const json = (await res.json()) as
-        | { fileId: string; meta: UploadMeta; error?: string }
-        | { error: string };
-
-      if (!res.ok) {
+      const parsed = parseMessagesFromHtmlBrowser(html);
+      if (parsed.length === 0) {
         setUploadError(
-          "error" in json ? (json.error ?? "Upload failed.") : "Upload failed.",
+          "No message blocks found. The HTML may not match the expected export format.",
         );
         return;
       }
 
-      if (!("fileId" in json)) {
-        setUploadError("Unexpected upload response.");
-        return;
-      }
+      const newFileId = crypto.randomUUID();
+      const newMeta = await saveParsedFileBrowser({
+        fileId: newFileId,
+        originalName: file.name,
+        messages: parsed,
+        originalHtml: html,
+      });
 
-      setFileId(json.fileId);
-      setMeta(json.meta);
+      setFileId(newFileId);
+      setMeta(newMeta);
+      setMessages(parsed);
+      setOriginalHtml(html);
       setView("parsed");
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : "Upload failed.");
@@ -168,36 +215,28 @@ export function HtmlSearchApp() {
       setOffset(offset);
 
       try {
-        const params = new URLSearchParams({
-          fileId,
+        const fromMs = parseDateMs(from, "start");
+        const toMs = parseDateMs(to, "end");
+
+        const { total, results } = searchMessages(messages, {
           q,
-          offset: String(offset),
-          limit: String(limit),
+          sender: sender || undefined,
+          fromMs,
+          toMs,
+          offset,
+          limit,
         });
 
-        if (sender) params.set("sender", sender);
-        if (from) params.set("from", from);
-        if (to) params.set("to", to);
-
-        const res = await fetch(`/api/search?${params.toString()}`);
-        const json = (await res.json()) as SearchApiResponse;
-
-        if (!res.ok) {
-          setSearchError(json.error ?? "Search failed.");
-          return;
-        }
-
-        setResults(json.results);
-        setTotal(json.total);
-        setMeta(json.meta);
-        setSelectedId(json.results[0]?.id ?? null);
+        setResults(results);
+        setTotal(total);
+        setSelectedId(results[0]?.id ?? null);
       } catch (e) {
         setSearchError(e instanceof Error ? e.message : "Search failed.");
       } finally {
         setSearching(false);
       }
     },
-    [fileId, q, sender, from, to, limit],
+    [fileId, q, sender, from, to, limit, messages],
   );
 
   const selected = useMemo(
@@ -205,12 +244,138 @@ export function HtmlSearchApp() {
     [results, selectedId],
   );
 
+  const originalIframeSrc = useMemo(() => {
+    if (!originalHtml) return null;
+    if (originalObjectUrlRef.current) {
+      URL.revokeObjectURL(originalObjectUrlRef.current);
+      originalObjectUrlRef.current = null;
+    }
+    const blob = new Blob([originalHtml], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    originalObjectUrlRef.current = url;
+    return url;
+  }, [originalHtml, fileId]);
+
+  const readableIframeSrc = useMemo(() => {
+    if (!fileId || !meta) return null;
+
+    if (readableObjectUrlRef.current) {
+      URL.revokeObjectURL(readableObjectUrlRef.current);
+      readableObjectUrlRef.current = null;
+    }
+
+    const fromMs = parseDateMs(from, "start");
+    const toMs = parseDateMs(to, "end");
+
+    const { total, results } = searchMessages(messages, {
+      q,
+      sender: sender || undefined,
+      fromMs,
+      toMs,
+      offset: 0,
+      limit: 5000,
+    });
+
+    const title = `Readable View — ${meta.originalName}`;
+
+    const filterSummary = [
+      q.trim() ? `q="${escapeHtml(q.trim())}"` : null,
+      sender ? `sender="${escapeHtml(sender)}"` : null,
+      from ? `from=${escapeHtml(from)}` : null,
+      to ? `to=${escapeHtml(to)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    const toc = results
+      .map((r) => {
+        const ts = escapeHtml(r.timestampRaw || "");
+        const senderEsc = escapeHtml(r.sender);
+        const snip = highlightHtml(r.snippet, q);
+        return `<a class="toc-item" href="#m-${r.id}"><span class="who">${senderEsc}</span><span class="ts">${ts}</span><div class="snip">${snip}</div></a>`;
+      })
+      .join("\n");
+
+    const body = results
+      .map((r) => {
+        const ts = escapeHtml(r.timestampRaw || "");
+        const senderEsc = escapeHtml(r.sender);
+        const text = highlightHtml(r.text, q);
+        return `
+<section class="msg" id="m-${r.id}">
+  <div class="meta"><span class="who">${senderEsc}</span><span class="ts">${ts}</span></div>
+  <div class="text">${text}</div>
+</section>`;
+      })
+      .join("\n");
+
+    const html = `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${escapeHtml(title)}</title>
+  <style>
+    :root{color-scheme:dark;--bg:#0b0f14;--fg:#f2f4f8;--muted:#a9b2c0;--border:#243140;--surface:#121922;--surface2:#0f141b;--accent:#6aa6ff}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+    a{color:inherit;text-decoration:none}
+    .wrap{display:grid;grid-template-columns:360px 1fr;min-height:100vh}
+    .side{border-right:1px solid var(--border);background:var(--surface2);position:sticky;top:0;align-self:start;height:100vh;overflow:auto}
+    .main{padding:18px 18px 60px}
+    .head{padding:14px 14px;border-bottom:1px solid var(--border)}
+    .head h1{font-size:14px;margin:0 0 6px;color:var(--fg)}
+    .head .sub{color:var(--muted);font-size:12px}
+    .toc{padding:10px 10px 18px;display:grid;gap:10px}
+    .toc-item{border:1px solid rgba(36,49,64,.65);border-radius:12px;padding:10px 10px;background:transparent}
+    .toc-item:hover{background:rgba(106,166,255,.10)}
+    .who{font-weight:700}
+    .ts{margin-left:10px;color:var(--muted);font-size:12px}
+    .snip{margin-top:6px;color:var(--fg);white-space:pre-wrap}
+    .msg{border:1px solid rgba(36,49,64,.65);border-radius:14px;background:var(--surface);padding:12px;margin:0 0 12px}
+    .msg .meta{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px}
+    .msg .text{white-space:pre-wrap}
+    mark{background:rgba(106,166,255,.25);color:var(--fg);padding:0 2px;border-radius:4px}
+    @media (max-width: 980px){.wrap{grid-template-columns:1fr}.side{position:relative;height:auto}.main{padding:14px}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <aside class="side">
+      <div class="head">
+        <h1>${escapeHtml(meta.originalName)}</h1>
+        <div class="sub">Matches: ${total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
+        <div class="sub">Tip: click a result to jump</div>
+      </div>
+      <nav class="toc">
+        ${toc || `<div style="padding:10px;color:var(--muted)">No matches.</div>`}
+      </nav>
+    </aside>
+    <main class="main">
+      ${body || `<div style="color:var(--muted)">No matches.</div>`}
+    </main>
+  </div>
+</body>
+</html>`;
+
+    const blob = new Blob([html], { type: "text/html" });
+    const url = URL.createObjectURL(blob);
+    readableObjectUrlRef.current = url;
+    return url;
+  }, [fileId, meta, messages, q, sender, from, to]);
+
+  useEffect(() => {
+    return () => {
+      if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
+      if (readableObjectUrlRef.current) URL.revokeObjectURL(readableObjectUrlRef.current);
+    };
+  }, []);
+
   return (
     <div style={{ maxWidth: 980, width: "100%", margin: "0 auto" }}>
       <header style={{ padding: "28px 0 12px" }}>
         <h1 style={{ fontSize: 28, margin: 0 }}>HTML Message Search</h1>
         <p style={{ margin: "8px 0 0", color: "var(--muted)" }}>
-          Upload an exported HTML file and search the extracted plain text.
+          Upload an exported HTML file and search it locally in your browser.
         </p>
       </header>
 
@@ -241,7 +406,7 @@ export function HtmlSearchApp() {
               cursor: uploading ? "not-allowed" : "pointer",
             }}
           >
-            {uploading ? "Uploading…" : "Upload & Parse"}
+            {uploading ? "Parsing…" : "Parse in Browser"}
           </button>
         </div>
         {uploadError && (
@@ -312,15 +477,7 @@ export function HtmlSearchApp() {
                   borderRadius: 12,
                   background: "var(--surface-2)",
                 }}
-                src={(() => {
-                  const params = new URLSearchParams({ fileId, q });
-                  if (sender) params.set("sender", sender);
-                  if (from) params.set("from", from);
-                  if (to) params.set("to", to);
-                  // include plenty of matches for navigation
-                  params.set("limit", "5000");
-                  return `/api/readable?${params.toString()}`;
-                })()}
+                src={readableIframeSrc ?? "about:blank"}
               />
             )}
 
@@ -335,7 +492,7 @@ export function HtmlSearchApp() {
                   borderRadius: 12,
                   background: "#fff",
                 }}
-                src={`/api/html?fileId=${encodeURIComponent(fileId)}`}
+                src={originalIframeSrc ?? "about:blank"}
               />
             )}
 
@@ -578,7 +735,7 @@ export function HtmlSearchApp() {
 
       <footer style={{ padding: "20px 0", color: "var(--muted)" }}>
         <small>
-          Note: Parsed files are saved locally under <code>data/</code>.
+          Note: Parsed files are stored locally in your browser (IndexedDB).
         </small>
       </footer>
     </div>
