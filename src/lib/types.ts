@@ -19,6 +19,8 @@ export type ParsedFileMeta = {
 
 export type SearchParams = {
   q: string;
+  exclude?: string;
+  matchMode?: "substring" | "word";
   sender?: string;
   fromMs?: number;
   toMs?: number;

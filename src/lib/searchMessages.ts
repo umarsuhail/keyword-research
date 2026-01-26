@@ -1,5 +1,59 @@
 import type { ParsedMessage, SearchHit, SearchParams } from "./types";
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function parseTerms(value: string): string[] {
+  return value
+    .trim()
+    .toLowerCase()
+    .split(/\s+/)
+    .map((t) => t.trim())
+    .filter(Boolean);
+}
+
+function matchesQuery(args: {
+  textNorm: string;
+  q: string;
+  matchMode: "substring" | "word";
+}): boolean {
+  const qTrim = args.q.trim();
+  if (!qTrim) return true;
+
+  const qNorm = qTrim.toLowerCase();
+
+  if (args.matchMode === "substring") {
+    return args.textNorm.includes(qNorm);
+  }
+
+  const terms = parseTerms(qTrim);
+  if (!terms.length) return true;
+
+  for (const term of terms) {
+    const re = new RegExp(`\\b${escapeRegExp(term)}\\b`, "i");
+    if (!re.test(args.textNorm)) return false;
+  }
+
+  return true;
+}
+
+function matchesExclude(args: {
+  textNorm: string;
+  exclude: string;
+}): boolean {
+  const exTrim = args.exclude.trim();
+  if (!exTrim) return false;
+
+  const terms = parseTerms(exTrim);
+  if (!terms.length) return false;
+
+  for (const term of terms) {
+    if (args.textNorm.includes(term)) return true;
+  }
+  return false;
+}
+
 function makeSnippet(args: {
   text: string;
   textNorm: string;
@@ -24,11 +78,20 @@ export function searchMessages(
   messages: ParsedMessage[],
   params: SearchParams,
 ): { total: number; results: SearchHit[] } {
+  const matchMode = params.matchMode ?? "substring";
   const qNorm = params.q.trim().toLowerCase();
+  const firstTerm = matchMode === "word" ? parseTerms(params.q)[0] ?? "" : qNorm;
 
   const filtered: ParsedMessage[] = [];
   for (const message of messages) {
     if (params.sender && message.sender !== params.sender) continue;
+
+    if (typeof params.exclude === "string" && matchesExclude({
+      textNorm: message.textNorm,
+      exclude: params.exclude,
+    })) {
+      continue;
+    }
 
     if (typeof params.fromMs === "number") {
       if (typeof message.timestampMs !== "number" || message.timestampMs < params.fromMs) {
@@ -42,9 +105,7 @@ export function searchMessages(
       }
     }
 
-    if (qNorm) {
-      if (!message.textNorm.includes(qNorm)) continue;
-    }
+    if (!matchesQuery({ textNorm: message.textNorm, q: params.q, matchMode })) continue;
 
     filtered.push(message);
   }
@@ -65,8 +126,8 @@ export function searchMessages(
     timestampRaw: m.timestampRaw,
     timestampMs: m.timestampMs,
     text: m.text,
-    snippet: qNorm
-      ? makeSnippet({ text: m.text, textNorm: m.textNorm, qNorm })
+    snippet: firstTerm
+      ? makeSnippet({ text: m.text, textNorm: m.textNorm, qNorm: firstTerm })
       : makeSnippet({ text: m.text, textNorm: m.textNorm, qNorm: "" }),
   }));
 

@@ -1,4 +1,6 @@
-This is a Next.js app that accepts exported HTML chat/message files (e.g. Meta/Instagram exports), extracts message blocks into plain text, and lets you search + filter the results.
+This is a Next.js app that contains a **client-only Utilities Hub** (a collection of mini tools that run entirely in your browser).
+
+One of the tools is **HTML Message Search**: upload an exported HTML chat/message file (e.g. Meta/Instagram exports), extract message blocks into plain text, and search + filter the results.
 
 ## Getting Started
 
@@ -13,17 +15,17 @@ Open http://localhost:3000.
 
 ## How it works
 
-- Upload an `.html` file on the home page.
-- The server parses the HTML and extracts message blocks (sender, text, timestamp).
-- Parsed results are stored locally under `data/<fileId>/` (ignored by git).
-- Searches run server-side and support:
-	- Substring text search
-	- Sender filter
-	- Date range filter (via date inputs)
+- Open the app and pick a tool from the sidebar.
+- Tools run locally in your browser. For the HTML Message Search tool:
+	- Upload an `.html` file.
+	- The browser parses the HTML and extracts message blocks (sender, text, timestamp).
+	- Parsed results are stored in the browser (IndexedDB).
+	- Searches run client-side and support substring search, sender filter, and date range.
 
 ## Notes
 
-- This is designed for local usage. If you deploy to a serverless environment (e.g. Vercel), writing to the local filesystem is not persistent.
+- This is designed to work on serverless deployments (e.g. Vercel) because it does not require server storage.
+- Data is per-browser (not shared across devices) unless you add a backend datastore.
 
 You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
 

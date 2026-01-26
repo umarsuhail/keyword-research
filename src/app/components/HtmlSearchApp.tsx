@@ -4,7 +4,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { parseMessagesFromHtmlBrowser } from "@/lib/parseHtml.browser";
 import { searchMessages } from "@/lib/searchMessages";
-import { saveParsedFileBrowser } from "@/lib/storage.browser";
+import {
+  listStoredFilesBrowser,
+  loadParsedFileBrowser,
+  saveParsedFileBrowser,
+} from "@/lib/storage.browser";
 
 type UploadMeta = {
   fileId: string;
@@ -17,22 +21,15 @@ type UploadMeta = {
 };
 
 type SearchHit = {
+  key: string;
+  fileId: string;
+  fileName: string;
   id: string;
   sender: string;
   timestampRaw: string;
   timestampMs: number | null;
   text: string;
   snippet: string;
-};
-
-type SearchApiResponse = {
-  fileId: string;
-  meta: UploadMeta;
-  total: number;
-  offset: number;
-  limit: number;
-  results: SearchHit[];
-  error?: string;
 };
 
 function parseDateMs(value: string, mode: "start" | "end"): number | undefined {
@@ -123,14 +120,20 @@ function formatRange(meta: UploadMeta): string {
 }
 
 export function HtmlSearchApp() {
-  const [file, setFile] = useState<File | null>(null);
+  const [files, setFiles] = useState<File[]>([]);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadNote, setUploadNote] = useState<string | null>(null);
+
+  const [storedFiles, setStoredFiles] = useState<UploadMeta[]>([]);
+  const [searchScope, setSearchScope] = useState<"active" | "all">("active");
 
   const [fileId, setFileId] = useState<string | null>(null);
   const [meta, setMeta] = useState<UploadMeta | null>(null);
 
   const [q, setQ] = useState("");
+  const [exclude, setExclude] = useState<string>("");
+  const [matchMode, setMatchMode] = useState<"substring" | "word">("substring");
   const [sender, setSender] = useState<string>("");
   const [from, setFrom] = useState<string>("");
   const [to, setTo] = useState<string>("");
@@ -140,7 +143,7 @@ export function HtmlSearchApp() {
   const [results, setResults] = useState<SearchHit[]>([]);
   const [total, setTotal] = useState<number>(0);
   const [offset, setOffset] = useState<number>(0);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [view, setView] = useState<"parsed" | "original" | "readable">("parsed");
 
   const [messages, setMessages] = useState<
@@ -153,122 +156,89 @@ export function HtmlSearchApp() {
       timestampMs: number | null;
     }>
   >([]);
-  const [originalHtml, setOriginalHtml] = useState<string>("");
+  const [originals, setOriginals] = useState<Array<{ name: string; html: string }>>([]);
+  const [originalIndex, setOriginalIndex] = useState<number>(0);
 
+  const [originalIframeSrc, setOriginalIframeSrc] = useState<string | null>(null);
+  const [readableIframeSrc, setReadableIframeSrc] = useState<string | null>(null);
+  const [readableAnchorId, setReadableAnchorId] = useState<string | null>(null);
   const originalObjectUrlRef = useRef<string | null>(null);
   const readableObjectUrlRef = useRef<string | null>(null);
+  const readableAnchorIdRef = useRef<string | null>(null);
+  const contextScrollRef = useRef<HTMLDivElement | null>(null);
 
   const limit = 50;
 
-  const canSearch = Boolean(fileId);
+  const canSearch = searchScope === "all" ? storedFiles.length > 0 : Boolean(fileId);
 
-  const senders = useMemo(() => meta?.senders ?? [], [meta]);
-
-  const upload = useCallback(async () => {
-    if (!file) return;
-
-    setUploading(true);
-    setUploadError(null);
-    setSearchError(null);
-    setResults([]);
-    setTotal(0);
-    setOffset(0);
-    setSelectedId(null);
-
-    try {
-      const html = await file.text();
-
-      const parsed = parseMessagesFromHtmlBrowser(html);
-      if (parsed.length === 0) {
-        setUploadError(
-          "No message blocks found. The HTML may not match the expected export format.",
-        );
-        return;
-      }
-
-      const newFileId = crypto.randomUUID();
-      const newMeta = await saveParsedFileBrowser({
-        fileId: newFileId,
-        originalName: file.name,
-        messages: parsed,
-        originalHtml: html,
-      });
-
-      setFileId(newFileId);
-      setMeta(newMeta);
-      setMessages(parsed);
-      setOriginalHtml(html);
-      setView("parsed");
-    } catch (e) {
-      setUploadError(e instanceof Error ? e.message : "Upload failed.");
-    } finally {
-      setUploading(false);
+  const senders = useMemo(() => {
+    if (searchScope === "all") {
+      const all = storedFiles.flatMap((m) => m.senders ?? []);
+      return Array.from(new Set(all)).sort();
     }
-  }, [file]);
+    return meta?.senders ?? [];
+  }, [meta, searchScope, storedFiles]);
 
-  const search = useCallback(
-    async (offset = 0) => {
-      if (!fileId) return;
+  const refreshStoredFiles = useCallback(async () => {
+    const all = (await listStoredFilesBrowser()) as UploadMeta[];
+    setStoredFiles(all);
+    return all;
+  }, []);
 
-      setSearching(true);
-      setSearchError(null);
-      setOffset(offset);
+  const loadActiveFile = useCallback(async (nextFileId: string) => {
+    const loaded = await loadParsedFileBrowser(nextFileId);
+    setFileId(nextFileId);
+    setMeta(loaded.meta as UploadMeta);
+    setMessages(loaded.messages);
+    setOriginals(loaded.originals);
+    setOriginalIndex(0);
+    setView("parsed");
+  }, []);
 
-      try {
-        const fromMs = parseDateMs(from, "start");
-        const toMs = parseDateMs(to, "end");
-
-        const { total, results } = searchMessages(messages, {
-          q,
-          sender: sender || undefined,
-          fromMs,
-          toMs,
-          offset,
-          limit,
+  useEffect(() => {
+    // Populate stored datasets on first load.
+    refreshStoredFiles().then((all) => {
+      if (!fileId && all.length) {
+        loadActiveFile(all[0].fileId).catch(() => {
+          // ignore; user can upload again
         });
-
-        setResults(results);
-        setTotal(total);
-        setSelectedId(results[0]?.id ?? null);
-      } catch (e) {
-        setSearchError(e instanceof Error ? e.message : "Search failed.");
-      } finally {
-        setSearching(false);
       }
-    },
-    [fileId, q, sender, from, to, limit, messages],
-  );
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const selected = useMemo(
-    () => results.find((r) => r.id === selectedId) ?? null,
-    [results, selectedId],
-  );
+  const selectedOriginal = useMemo(() => {
+    if (!originals.length) return null;
+    const idx = Math.min(Math.max(0, originalIndex), originals.length - 1);
+    return originals[idx] ?? null;
+  }, [originals, originalIndex]);
 
-  const originalIframeSrc = useMemo(() => {
-    if (!originalHtml) return null;
-    if (originalObjectUrlRef.current) {
-      URL.revokeObjectURL(originalObjectUrlRef.current);
-      originalObjectUrlRef.current = null;
-    }
-    const blob = new Blob([originalHtml], { type: "text/html" });
+  useEffect(() => {
+    setOriginalIframeSrc(null);
+    if (!selectedOriginal?.html) return;
+
+    const blob = new Blob([selectedOriginal.html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     originalObjectUrlRef.current = url;
-    return url;
-  }, [originalHtml, fileId]);
+    setOriginalIframeSrc(url);
 
-  const readableIframeSrc = useMemo(() => {
-    if (!fileId || !meta) return null;
+    return () => {
+      URL.revokeObjectURL(url);
+      if (originalObjectUrlRef.current === url) originalObjectUrlRef.current = null;
+    };
+  }, [selectedOriginal?.html, fileId]);
 
-    if (readableObjectUrlRef.current) {
-      URL.revokeObjectURL(readableObjectUrlRef.current);
-      readableObjectUrlRef.current = null;
-    }
+  useEffect(() => {
+    setReadableIframeSrc(null);
+    if (!fileId || !meta) return;
 
     const fromMs = parseDateMs(from, "start");
     const toMs = parseDateMs(to, "end");
 
     const { total, results } = searchMessages(messages, {
       q,
+      exclude,
+      matchMode,
       sender: sender || undefined,
       fromMs,
       toMs,
@@ -279,8 +249,8 @@ export function HtmlSearchApp() {
     const title = `Readable View — ${meta.originalName}`;
 
     const filterSummary = [
-      q.trim() ? `q="${escapeHtml(q.trim())}"` : null,
-      sender ? `sender="${escapeHtml(sender)}"` : null,
+      q.trim() ? `q=\"${escapeHtml(q.trim())}\"` : null,
+      sender ? `sender=\"${escapeHtml(sender)}\"` : null,
       from ? `from=${escapeHtml(from)}` : null,
       to ? `to=${escapeHtml(to)}` : null,
     ]
@@ -292,7 +262,7 @@ export function HtmlSearchApp() {
         const ts = escapeHtml(r.timestampRaw || "");
         const senderEsc = escapeHtml(r.sender);
         const snip = highlightHtml(r.snippet, q);
-        return `<a class="toc-item" href="#m-${r.id}"><span class="who">${senderEsc}</span><span class="ts">${ts}</span><div class="snip">${snip}</div></a>`;
+        return `<a class=\"toc-item\" href=\"#m-${r.id}\"><span class=\"who\">${senderEsc}</span><span class=\"ts\">${ts}</span><div class=\"snip\">${snip}</div></a>`;
       })
       .join("\n");
 
@@ -302,18 +272,18 @@ export function HtmlSearchApp() {
         const senderEsc = escapeHtml(r.sender);
         const text = highlightHtml(r.text, q);
         return `
-<section class="msg" id="m-${r.id}">
-  <div class="meta"><span class="who">${senderEsc}</span><span class="ts">${ts}</span></div>
-  <div class="text">${text}</div>
+<section class=\"msg\" id=\"m-${r.id}\">
+  <div class=\"meta\"><span class=\"who\">${senderEsc}</span><span class=\"ts\">${ts}</span></div>
+  <div class=\"text\">${text}</div>
 </section>`;
       })
       .join("\n");
 
     const html = `<!doctype html>
-<html lang="en">
+<html lang=\"en\">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
   <title>${escapeHtml(title)}</title>
   <style>
     :root{color-scheme:dark;--bg:#0b0f14;--fg:#f2f4f8;--muted:#a9b2c0;--border:#243140;--surface:#121922;--surface2:#0f141b;--accent:#6aa6ff}
@@ -339,19 +309,19 @@ export function HtmlSearchApp() {
   </style>
 </head>
 <body>
-  <div class="wrap">
-    <aside class="side">
-      <div class="head">
+  <div class=\"wrap\">
+    <aside class=\"side\">
+      <div class=\"head\">
         <h1>${escapeHtml(meta.originalName)}</h1>
-        <div class="sub">Matches: ${total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
-        <div class="sub">Tip: click a result to jump</div>
+        <div class=\"sub\">Matches: ${total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
+        <div class=\"sub\">Tip: click a result to jump</div>
       </div>
-      <nav class="toc">
-        ${toc || `<div style="padding:10px;color:var(--muted)">No matches.</div>`}
+      <nav class=\"toc\">
+        ${toc || `<div style=\"padding:10px;color:var(--muted)\">No matches.</div>`}
       </nav>
     </aside>
-    <main class="main">
-      ${body || `<div style="color:var(--muted)">No matches.</div>`}
+    <main class=\"main\">
+      ${body || `<div style=\"color:var(--muted)\">No matches.</div>`}
     </main>
   </div>
 </body>
@@ -360,22 +330,259 @@ export function HtmlSearchApp() {
     const blob = new Blob([html], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     readableObjectUrlRef.current = url;
-    return url;
-  }, [fileId, meta, messages, q, sender, from, to]);
+    const anchor = readableAnchorIdRef.current;
+    const hash = anchor ? `#m-${anchor}` : "";
+    setReadableIframeSrc(`${url}${hash}`);
+
+    return () => {
+      URL.revokeObjectURL(url);
+      if (readableObjectUrlRef.current === url) readableObjectUrlRef.current = null;
+    };
+  }, [fileId, meta, messages, q, exclude, matchMode, sender, from, to]);
 
   useEffect(() => {
-    return () => {
-      if (originalObjectUrlRef.current) URL.revokeObjectURL(originalObjectUrlRef.current);
-      if (readableObjectUrlRef.current) URL.revokeObjectURL(readableObjectUrlRef.current);
+    readableAnchorIdRef.current = readableAnchorId;
+    const base = readableObjectUrlRef.current;
+    if (!base) return;
+
+    const hash = readableAnchorId ? `#m-${readableAnchorId}` : "";
+    setReadableIframeSrc(`${base}${hash}`);
+  }, [readableAnchorId]);
+
+  const upload = useCallback(async () => {
+    if (!files.length) return;
+
+    setUploading(true);
+    setUploadError(null);
+    setUploadNote(null);
+    setSearchError(null);
+
+    try {
+      const created: UploadMeta[] = [];
+
+      for (const file of files) {
+        const html = await file.text();
+        const parsed = parseMessagesFromHtmlBrowser(html);
+
+        const newFileId =
+          typeof crypto?.randomUUID === "function"
+            ? crypto.randomUUID()
+            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+        const savedMeta = await saveParsedFileBrowser({
+          fileId: newFileId,
+          originalName: file.name ?? "(unknown)",
+          messages: parsed,
+          originals: [{ name: file.name ?? "(unknown)", html }],
+        });
+
+        created.push(savedMeta as UploadMeta);
+      }
+
+      const all = await refreshStoredFiles();
+
+      // Make the newest uploaded file active for viewing.
+      const nextActive = created[0]?.fileId ?? all[0]?.fileId;
+      if (nextActive) {
+        await loadActiveFile(nextActive);
+      }
+
+      setResults([]);
+      setTotal(0);
+      setOffset(0);
+      setSelectedKey(null);
+      setUploadNote(
+        created.length === 1
+          ? `Saved 1 dataset: ${created[0]?.originalName ?? "(unknown)"}`
+          : `Saved ${created.length} datasets. Use “Search across all stored datasets” to search them together.`,
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setUploadError(msg || "Upload failed");
+    } finally {
+      setUploading(false);
+    }
+  }, [files, loadActiveFile, refreshStoredFiles]);
+
+  const search = useCallback(
+    async (nextOffset: number) => {
+      if (searchScope === "active" && !fileId) return;
+      if (searchScope === "all" && storedFiles.length === 0) return;
+
+      setSearching(true);
+      setSearchError(null);
+      try {
+        const fromMs = parseDateMs(from, "start");
+        const toMs = parseDateMs(to, "end");
+
+        if (searchScope === "active") {
+          const { total, results } = searchMessages(messages, {
+            q,
+            exclude,
+            matchMode,
+            sender: sender || undefined,
+            fromMs,
+            toMs,
+            offset: nextOffset,
+            limit,
+          });
+
+          const wrapped: SearchHit[] = results.map((r) => ({
+            ...r,
+            fileId: fileId!,
+            fileName: meta?.originalName ?? "(unknown)",
+            key: `${fileId!}:${r.id}`,
+          }));
+
+          setResults(wrapped);
+          setTotal(total);
+          setOffset(nextOffset);
+
+          if (wrapped.length === 0) {
+            setSelectedKey(null);
+          } else if (!wrapped.some((r) => r.key === selectedKey)) {
+            setSelectedKey(wrapped[0].key);
+          }
+          return;
+        }
+
+        // Search across all stored datasets (without persisting a combined dataset).
+        const fileIds = storedFiles.map((m) => m.fileId);
+        const loaded = await Promise.all(
+          fileIds.map(async (id) => {
+            const v = await loadParsedFileBrowser(id);
+            return { fileId: id, meta: v.meta as UploadMeta, messages: v.messages };
+          }),
+        );
+
+        const merged: SearchHit[] = [];
+        for (const entry of loaded) {
+          const { results } = searchMessages(entry.messages, {
+            q,
+            exclude,
+            matchMode,
+            sender: sender || undefined,
+            fromMs,
+            toMs,
+            offset: 0,
+            limit: Math.max(1, entry.messages.length),
+          });
+          for (const r of results) {
+            merged.push({
+              ...r,
+              fileId: entry.fileId,
+              fileName: entry.meta.originalName,
+              key: `${entry.fileId}:${r.id}`,
+            });
+          }
+        }
+
+        merged.sort((a, b) => {
+          const av = typeof a.timestampMs === "number" ? a.timestampMs : -1;
+          const bv = typeof b.timestampMs === "number" ? b.timestampMs : -1;
+          return bv - av;
+        });
+
+        const totalAll = merged.length;
+        const slice = merged.slice(nextOffset, nextOffset + limit);
+
+        setResults(slice);
+        setTotal(totalAll);
+        setOffset(nextOffset);
+
+        if (slice.length === 0) {
+          setSelectedKey(null);
+        } else if (!slice.some((r) => r.key === selectedKey)) {
+          setSelectedKey(slice[0].key);
+        }
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setSearchError(msg || "Search failed");
+      } finally {
+        setSearching(false);
+      }
+    },
+    [
+      exclude,
+      fileId,
+      from,
+      limit,
+      matchMode,
+      messages,
+      meta?.originalName,
+      q,
+      searchScope,
+      selectedKey,
+      sender,
+      storedFiles,
+      to,
+    ],
+  );
+
+  const selected = useMemo(
+    () => results.find((r) => r.key === selectedKey) ?? null,
+    [results, selectedKey],
+  );
+
+  const sortedActiveMessages = useMemo(() => {
+    const copy = [...messages];
+    // Keep ordering consistent with search results: newest first; unknown dates at end.
+    copy.sort((a, b) => {
+      const av = typeof a.timestampMs === "number" ? a.timestampMs : -1;
+      const bv = typeof b.timestampMs === "number" ? b.timestampMs : -1;
+      return bv - av;
+    });
+    return copy;
+  }, [messages]);
+
+  const selectedContext = useMemo(() => {
+    if (!selected) return { slice: [], start: 0, selectedIndex: -1 };
+    const idx = sortedActiveMessages.findIndex((m) => m.id === selected.id);
+    if (idx < 0) return { slice: [], start: 0, selectedIndex: -1 };
+    const radius = 20;
+    const start = Math.max(0, idx - radius);
+    const end = Math.min(sortedActiveMessages.length, idx + radius + 1);
+    return {
+      slice: sortedActiveMessages.slice(start, end),
+      start,
+      selectedIndex: idx,
     };
-  }, []);
+  }, [selected, sortedActiveMessages]);
+
+  useEffect(() => {
+    if (!selected) return;
+    // Defer until after render so the element exists.
+    const t = window.setTimeout(() => {
+      const el = document.getElementById(`ctx-${selected.fileId}-${selected.id}`);
+      el?.scrollIntoView({ block: "center" });
+    }, 0);
+    return () => window.clearTimeout(t);
+  }, [selected, fileId]);
+
+  const onSelectResult = useCallback(
+    async (hit: SearchHit) => {
+      setSelectedKey(hit.key);
+
+      // Prime readable view to jump directly to the selected message.
+      setReadableAnchorId(hit.id);
+
+      if (hit.fileId && hit.fileId !== fileId) {
+        try {
+          await loadActiveFile(hit.fileId);
+        } catch {
+          // ignore
+        }
+      }
+    },
+    [fileId, loadActiveFile],
+  );
 
   return (
     <div style={{ maxWidth: 980, width: "100%", margin: "0 auto" }}>
       <header style={{ padding: "28px 0 12px" }}>
         <h1 style={{ fontSize: 28, margin: 0 }}>HTML Message Search</h1>
         <p style={{ margin: "8px 0 0", color: "var(--muted)" }}>
-          Upload an exported HTML file and search it locally in your browser.
+          Upload exported HTML file(s) and search locally in your browser.
         </p>
       </header>
 
@@ -392,11 +599,12 @@ export function HtmlSearchApp() {
           <input
             type="file"
             accept="text/html,.html,.htm"
-            onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            multiple
+            onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
           />
           <button
             onClick={upload}
-            disabled={!file || uploading}
+            disabled={!files.length || uploading}
             style={{
               padding: "8px 12px",
               borderRadius: 10,
@@ -409,6 +617,19 @@ export function HtmlSearchApp() {
             {uploading ? "Parsing…" : "Parse in Browser"}
           </button>
         </div>
+        {files.length > 1 && (
+          <div style={{ margin: "10px 0 0", color: "var(--muted)" }}>
+            <div>
+              Selected {files.length} files. They will be saved as separate datasets.
+            </div>
+            <div style={{ marginTop: 6, fontSize: 12 }}>
+              {files.map((f) => f.name).join(" · ")}
+            </div>
+          </div>
+        )}
+        {uploadNote && (
+          <p style={{ margin: "10px 0 0", color: "var(--muted)" }}>{uploadNote}</p>
+        )}
         {uploadError && (
           <p style={{ margin: "10px 0 0", color: "#b00020" }}>{uploadError}</p>
         )}
@@ -482,18 +703,45 @@ export function HtmlSearchApp() {
             )}
 
             {view === "original" && (
-              <iframe
-                title="Original HTML"
-                sandbox=""
-                style={{
-                  width: "100%",
-                  height: 540,
-                  border: "1px solid var(--border)",
-                  borderRadius: 12,
-                  background: "#fff",
-                }}
-                src={originalIframeSrc ?? "about:blank"}
-              />
+              <>
+                {originals.length > 1 && (
+                  <div style={{ marginBottom: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <label style={{ color: "var(--muted)" }}>
+                      Original file:
+                      <select
+                        value={String(originalIndex)}
+                        onChange={(e) => setOriginalIndex(Number(e.target.value) || 0)}
+                        style={{
+                          marginLeft: 8,
+                          padding: "8px 10px",
+                          borderRadius: 10,
+                          border: "1px solid var(--border)",
+                          background: "var(--surface-2)",
+                          color: "var(--foreground)",
+                        }}
+                      >
+                        {originals.map((o, idx) => (
+                          <option key={o.name + idx} value={String(idx)}>
+                            {o.name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+                )}
+                <iframe
+                  title="Original HTML"
+                  sandbox=""
+                  style={{
+                    width: "100%",
+                    height: 540,
+                    border: "1px solid var(--border)",
+                    borderRadius: 12,
+                    background: "#fff",
+                  }}
+                  src={originalIframeSrc ?? "about:blank"}
+                />
+              </>
             )}
 
             {view === "parsed" && (
@@ -517,10 +765,56 @@ export function HtmlSearchApp() {
       >
         <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>2) Search</h2>
 
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
+          <label style={{ color: "var(--muted)" }}>
+            Active dataset:
+            <select
+              value={fileId ?? ""}
+              onChange={(e) => {
+                const next = e.target.value;
+                if (next) {
+                  loadActiveFile(next).catch(() => {
+                    // ignore
+                  });
+                }
+              }}
+              disabled={storedFiles.length === 0}
+              style={{
+                marginLeft: 8,
+                padding: "8px 10px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+              }}
+            >
+              {storedFiles.length === 0 ? (
+                <option value="">(none)</option>
+              ) : (
+                storedFiles.map((m) => (
+                  <option key={m.fileId} value={m.fileId}>
+                    {m.originalName}
+                  </option>
+                ))
+              )}
+            </select>
+          </label>
+
+          <label style={{ color: "var(--muted)", display: "flex", alignItems: "center", gap: 8 }}>
+            <input
+              type="checkbox"
+              checked={searchScope === "all"}
+              onChange={(e) => setSearchScope(e.target.checked ? "all" : "active")}
+              disabled={storedFiles.length === 0}
+            />
+            Search across all stored datasets ({storedFiles.length})
+          </label>
+        </div>
+
         <div
           style={{
             display: "grid",
-            gridTemplateColumns: "1.5fr 1fr 1fr 1fr auto",
+            gridTemplateColumns: "1.5fr 1fr 1fr 1fr 1fr auto",
             gap: 10,
           }}
         >
@@ -528,6 +822,19 @@ export function HtmlSearchApp() {
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder="Search text (plain text / substring)"
+            disabled={!canSearch}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid var(--border)",
+              background: "var(--surface-2)",
+              color: "var(--foreground)",
+            }}
+          />
+          <input
+            value={exclude}
+            onChange={(e) => setExclude(e.target.value)}
+            placeholder='Exclude text (e.g. "malappuram")'
             disabled={!canSearch}
             style={{
               padding: "10px 12px",
@@ -555,6 +862,21 @@ export function HtmlSearchApp() {
                 {s}
               </option>
             ))}
+          </select>
+          <select
+            value={matchMode}
+            onChange={(e) => setMatchMode((e.target.value as "substring" | "word") ?? "substring")}
+            disabled={!canSearch}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 10,
+              border: "1px solid var(--border)",
+              background: "var(--surface-2)",
+              color: "var(--foreground)",
+            }}
+          >
+            <option value="substring">Substring match</option>
+            <option value="word">Whole word only</option>
           </select>
           <input
             type="date"
@@ -633,11 +955,11 @@ export function HtmlSearchApp() {
             </div>
             <div style={{ maxHeight: 420, overflow: "auto" }}>
               {results.map((r) => {
-                const active = r.id === selectedId;
+                const active = r.key === selectedKey;
                 return (
                   <button
-                    key={r.id}
-                    onClick={() => setSelectedId(r.id)}
+                    key={r.key}
+                    onClick={() => onSelectResult(r)}
                     style={{
                       display: "block",
                       width: "100%",
@@ -652,6 +974,9 @@ export function HtmlSearchApp() {
                   >
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                       <strong>{r.sender}</strong>
+                      {searchScope === "all" && (
+                        <span style={{ color: "var(--muted)" }}>{r.fileName}</span>
+                      )}
                       <span style={{ color: "var(--muted)" }}>{r.timestampRaw || ""}</span>
                     </div>
                     <div style={{ marginTop: 6, whiteSpace: "pre-wrap", color: "var(--foreground)" }}>
@@ -677,21 +1002,91 @@ export function HtmlSearchApp() {
               minHeight: 200,
             }}
           >
-            <div style={{ color: "var(--muted)", marginBottom: 8 }}>Selected message</div>
-            {selected ? (
+            <div style={{ color: "var(--muted)", marginBottom: 8 }}>
+              Selected message (with nearby context)
+            </div>
+
+            {!selected ? (
+              <div style={{ color: "var(--muted)" }}>
+                Click a result on the left to open it here.
+              </div>
+            ) : selectedContext.selectedIndex < 0 ? (
+              <div style={{ color: "var(--muted)" }}>
+                Loading message context…
+              </div>
+            ) : (
               <>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <div
+                  style={{
+                    display: "flex",
+                    gap: 10,
+                    flexWrap: "wrap",
+                    marginBottom: 10,
+                    alignItems: "center",
+                  }}
+                >
                   <strong>{selected.sender}</strong>
+                  {searchScope === "all" && (
+                    <span style={{ color: "var(--muted)" }}>{selected.fileName}</span>
+                  )}
                   <span style={{ color: "var(--muted)" }}>{selected.timestampRaw || ""}</span>
+                  <span style={{ color: "var(--muted)" }}>
+                    (message {selectedContext.selectedIndex + 1} of {sortedActiveMessages.length})
+                  </span>
+
+                  <button
+                    onClick={() => {
+                      setReadableAnchorId(selected.id);
+                      setView("readable");
+                    }}
+                    style={{
+                      marginLeft: "auto",
+                      padding: "6px 10px",
+                      borderRadius: 10,
+                      border: "1px solid var(--border)",
+                      background: "var(--surface-2)",
+                      color: "var(--foreground)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Open in Readable view
+                  </button>
                 </div>
-                <div style={{ marginTop: 10, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-                  <HighlightedText text={selected.text} query={q} />
+
+                <div
+                  ref={contextScrollRef}
+                  style={{
+                    maxHeight: 360,
+                    overflow: "auto",
+                    border: "1px solid rgba(36,49,64,0.65)",
+                    borderRadius: 12,
+                    background: "rgba(0,0,0,0.12)",
+                  }}
+                >
+                  {selectedContext.slice.map((m) => {
+                    const isSel = m.id === selected.id;
+                    return (
+                      <div
+                        key={m.id}
+                        id={`ctx-${selected.fileId}-${m.id}`}
+                        style={{
+                          padding: "10px 10px",
+                          borderBottom: "1px solid rgba(36,49,64,0.55)",
+                          background: isSel ? "rgba(106, 166, 255, 0.14)" : "transparent",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                          <strong>{m.sender}</strong>
+                          <span style={{ color: "var(--muted)" }}>{m.timestampRaw || ""}</span>
+                        </div>
+                        <div style={{ marginTop: 6, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                          <HighlightedText text={m.text} query={isSel ? q : ""} />
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               </>
-            ) : (
-              <div style={{ color: "var(--muted)" }}>
-                Click a result on the left to view it here.
-              </div>
             )}
           </div>
         </div>
@@ -735,7 +1130,8 @@ export function HtmlSearchApp() {
 
       <footer style={{ padding: "20px 0", color: "var(--muted)" }}>
         <small>
-          Note: Parsed files are stored locally in your browser (IndexedDB).
+          Note: Parsed files are stored locally in your browser (IndexedDB). Searching across all loads each dataset
+          from IndexedDB on demand.
         </small>
       </footer>
     </div>

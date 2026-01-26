@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "HTML Message Search",
-  description: "Upload an HTML export and search/filter extracted plain text.",
+  title: "Utilities Hub",
+  description: "A collection of client-only mini tools (search, text, JSON, hashes, passwords, and more).",
 };
 
 export default function RootLayout({

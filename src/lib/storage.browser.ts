@@ -1,13 +1,15 @@
 import type { ParsedFileMeta, ParsedMessage } from "./types";
 
 const DB_NAME = "html-message-search";
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 type StoredFile = {
   fileId: string;
   meta: ParsedFileMeta;
   messages: ParsedMessage[];
-  originalHtml: string;
+  originals?: Array<{ name: string; html: string }>;
+  // Back-compat (DB v1)
+  originalHtml?: string;
 };
 
 function openDb(): Promise<IDBDatabase> {
@@ -65,7 +67,7 @@ export async function saveParsedFileBrowser(args: {
   fileId: string;
   originalName: string;
   messages: ParsedMessage[];
-  originalHtml: string;
+  originals: Array<{ name: string; html: string }>;
 }): Promise<ParsedFileMeta> {
   const meta = computeMeta(args);
 
@@ -77,7 +79,7 @@ export async function saveParsedFileBrowser(args: {
     fileId: args.fileId,
     meta,
     messages: args.messages,
-    originalHtml: args.originalHtml,
+    originals: args.originals,
   } satisfies StoredFile);
 
   await txDone(tx);
@@ -88,7 +90,7 @@ export async function saveParsedFileBrowser(args: {
 export async function loadParsedFileBrowser(fileId: string): Promise<{
   meta: ParsedFileMeta;
   messages: ParsedMessage[];
-  originalHtml: string;
+  originals: Array<{ name: string; html: string }>;
 }> {
   const db = await openDb();
   const tx = db.transaction(["files"], "readonly");
@@ -102,7 +104,14 @@ export async function loadParsedFileBrowser(fileId: string): Promise<{
     throw new Error("Unknown fileId");
   }
 
-  return { meta: value.meta, messages: value.messages, originalHtml: value.originalHtml };
+  const originals =
+    value.originals && value.originals.length
+      ? value.originals
+      : value.originalHtml
+        ? [{ name: value.meta.originalName, html: value.originalHtml }]
+        : [];
+
+  return { meta: value.meta, messages: value.messages, originals };
 }
 
 export async function listStoredFilesBrowser(): Promise<ParsedFileMeta[]> {
