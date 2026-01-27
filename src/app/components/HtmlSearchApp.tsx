@@ -165,7 +165,6 @@ export function HtmlSearchApp() {
   const originalObjectUrlRef = useRef<string | null>(null);
   const readableObjectUrlRef = useRef<string | null>(null);
   const readableAnchorIdRef = useRef<string | null>(null);
-  const contextScrollRef = useRef<HTMLDivElement | null>(null);
 
   const limit = 50;
 
@@ -192,7 +191,6 @@ export function HtmlSearchApp() {
     setMessages(loaded.messages);
     setOriginals(loaded.originals);
     setOriginalIndex(0);
-    setView("parsed");
   }, []);
 
   useEffect(() => {
@@ -246,7 +244,7 @@ export function HtmlSearchApp() {
       limit: 5000,
     });
 
-    const title = `Readable View — ${meta.originalName}`;
+    const title = `File View — ${meta.originalName}`;
 
     const filterSummary = [
       q.trim() ? `q=\"${escapeHtml(q.trim())}\"` : null,
@@ -257,6 +255,8 @@ export function HtmlSearchApp() {
       .filter(Boolean)
       .join(" · ");
 
+    const matchIds = new Set(results.map((r) => r.id));
+
     const toc = results
       .map((r) => {
         const ts = escapeHtml(r.timestampRaw || "");
@@ -266,13 +266,32 @@ export function HtmlSearchApp() {
       })
       .join("\n");
 
-    const body = results
-      .map((r) => {
-        const ts = escapeHtml(r.timestampRaw || "");
-        const senderEsc = escapeHtml(r.sender);
-        const text = highlightHtml(r.text, q);
+    const filtered = messages
+      .filter((m) => {
+        if (sender && m.sender !== sender) return false;
+        if (typeof fromMs === "number" && typeof m.timestampMs === "number" && m.timestampMs < fromMs)
+          return false;
+        if (typeof toMs === "number" && typeof m.timestampMs === "number" && m.timestampMs > toMs)
+          return false;
+        return true;
+      })
+      .slice();
+
+    // Oldest first (unknown timestamps at end)
+    filtered.sort((a, b) => {
+      const av = typeof a.timestampMs === "number" ? a.timestampMs : Number.POSITIVE_INFINITY;
+      const bv = typeof b.timestampMs === "number" ? b.timestampMs : Number.POSITIVE_INFINITY;
+      return av - bv;
+    });
+
+    const body = filtered
+      .map((m) => {
+        const ts = escapeHtml(m.timestampRaw || "");
+        const senderEsc = escapeHtml(m.sender);
+        const isHit = matchIds.has(m.id);
+        const text = isHit ? highlightHtml(m.text, q) : escapeHtml(m.text);
         return `
-<section class=\"msg\" id=\"m-${r.id}\">
+<section class=\"msg${isHit ? " hit" : ""}\" id=\"m-${m.id}\">
   <div class=\"meta\"><span class=\"who\">${senderEsc}</span><span class=\"ts\">${ts}</span></div>
   <div class=\"text\">${text}</div>
 </section>`;
@@ -302,6 +321,7 @@ export function HtmlSearchApp() {
     .ts{margin-left:10px;color:var(--muted);font-size:12px}
     .snip{margin-top:6px;color:var(--fg);white-space:pre-wrap}
     .msg{border:1px solid rgba(36,49,64,.65);border-radius:14px;background:var(--surface);padding:12px;margin:0 0 12px}
+    .msg.hit{border-color:rgba(106,166,255,.55);box-shadow:0 0 0 1px rgba(106,166,255,.25) inset}
     .msg .meta{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px}
     .msg .text{white-space:pre-wrap}
     mark{background:rgba(106,166,255,.25);color:var(--fg);padding:0 2px;border-radius:4px}
@@ -314,14 +334,14 @@ export function HtmlSearchApp() {
       <div class=\"head\">
         <h1>${escapeHtml(meta.originalName)}</h1>
         <div class=\"sub\">Matches: ${total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
-        <div class=\"sub\">Tip: click a result to jump</div>
+        <div class=\"sub\">Tip: click a match to jump</div>
       </div>
       <nav class=\"toc\">
         ${toc || `<div style=\"padding:10px;color:var(--muted)\">No matches.</div>`}
       </nav>
     </aside>
     <main class=\"main\">
-      ${body || `<div style=\"color:var(--muted)\">No matches.</div>`}
+      ${body || `<div style=\"color:var(--muted)\">No messages in this filter range.</div>`}
     </main>
   </div>
 </body>
@@ -524,47 +544,13 @@ export function HtmlSearchApp() {
     [results, selectedKey],
   );
 
-  const sortedActiveMessages = useMemo(() => {
-    const copy = [...messages];
-    // Keep ordering consistent with search results: newest first; unknown dates at end.
-    copy.sort((a, b) => {
-      const av = typeof a.timestampMs === "number" ? a.timestampMs : -1;
-      const bv = typeof b.timestampMs === "number" ? b.timestampMs : -1;
-      return bv - av;
-    });
-    return copy;
-  }, [messages]);
-
-  const selectedContext = useMemo(() => {
-    if (!selected) return { slice: [], start: 0, selectedIndex: -1 };
-    const idx = sortedActiveMessages.findIndex((m) => m.id === selected.id);
-    if (idx < 0) return { slice: [], start: 0, selectedIndex: -1 };
-    const radius = 20;
-    const start = Math.max(0, idx - radius);
-    const end = Math.min(sortedActiveMessages.length, idx + radius + 1);
-    return {
-      slice: sortedActiveMessages.slice(start, end),
-      start,
-      selectedIndex: idx,
-    };
-  }, [selected, sortedActiveMessages]);
-
-  useEffect(() => {
-    if (!selected) return;
-    // Defer until after render so the element exists.
-    const t = window.setTimeout(() => {
-      const el = document.getElementById(`ctx-${selected.fileId}-${selected.id}`);
-      el?.scrollIntoView({ block: "center" });
-    }, 0);
-    return () => window.clearTimeout(t);
-  }, [selected, fileId]);
-
   const onSelectResult = useCallback(
     async (hit: SearchHit) => {
       setSelectedKey(hit.key);
 
       // Prime readable view to jump directly to the selected message.
       setReadableAnchorId(hit.id);
+      setView("readable");
 
       if (hit.fileId && hit.fileId !== fileId) {
         try {
@@ -578,7 +564,7 @@ export function HtmlSearchApp() {
   );
 
   return (
-    <div style={{ maxWidth: 980, width: "100%", margin: "0 auto" }}>
+    <div className="container">
       <header style={{ padding: "28px 0 12px" }}>
         <h1 style={{ fontSize: 28, margin: 0 }}>HTML Message Search</h1>
         <p style={{ margin: "8px 0 0", color: "var(--muted)" }}>
@@ -664,7 +650,7 @@ export function HtmlSearchApp() {
             {(
               [
                 { key: "parsed", label: "Parsed" },
-                { key: "readable", label: "Readable HTML" },
+                    { key: "readable", label: "File View" },
                 { key: "original", label: "Original HTML" },
               ] as const
             ).map((t) => (
@@ -689,7 +675,7 @@ export function HtmlSearchApp() {
           <div style={{ marginTop: 12 }}>
             {view === "readable" && (
               <iframe
-                title="Readable HTML"
+                title="File View"
                 sandbox=""
                 style={{
                   width: "100%",
@@ -812,11 +798,7 @@ export function HtmlSearchApp() {
         </div>
 
         <div
-          style={{
-            display: "grid",
-            gridTemplateColumns: "1.5fr 1fr 1fr 1fr 1fr auto",
-            gap: 10,
-          }}
+          className="searchGrid"
         >
           <input
             value={q}
@@ -929,12 +911,7 @@ export function HtmlSearchApp() {
         </div>
 
         <div
-          style={{
-            marginTop: 10,
-            display: "grid",
-            gridTemplateColumns: "1fr 1.2fr",
-            gap: 12,
-          }}
+          className="resultsGrid"
         >
           <div
             style={{
@@ -1002,17 +979,11 @@ export function HtmlSearchApp() {
               minHeight: 200,
             }}
           >
-            <div style={{ color: "var(--muted)", marginBottom: 8 }}>
-              Selected message (with nearby context)
-            </div>
+            <div style={{ color: "var(--muted)", marginBottom: 8 }}>Selected result</div>
 
             {!selected ? (
               <div style={{ color: "var(--muted)" }}>
                 Click a result on the left to open it here.
-              </div>
-            ) : selectedContext.selectedIndex < 0 ? (
-              <div style={{ color: "var(--muted)" }}>
-                Loading message context…
               </div>
             ) : (
               <>
@@ -1030,10 +1001,6 @@ export function HtmlSearchApp() {
                     <span style={{ color: "var(--muted)" }}>{selected.fileName}</span>
                   )}
                   <span style={{ color: "var(--muted)" }}>{selected.timestampRaw || ""}</span>
-                  <span style={{ color: "var(--muted)" }}>
-                    (message {selectedContext.selectedIndex + 1} of {sortedActiveMessages.length})
-                  </span>
-
                   <button
                     onClick={() => {
                       setReadableAnchorId(selected.id);
@@ -1049,42 +1016,16 @@ export function HtmlSearchApp() {
                       cursor: "pointer",
                     }}
                   >
-                    Open in Readable view
+                    Open file at message
                   </button>
                 </div>
 
-                <div
-                  ref={contextScrollRef}
-                  style={{
-                    maxHeight: 360,
-                    overflow: "auto",
-                    border: "1px solid rgba(36,49,64,0.65)",
-                    borderRadius: 12,
-                    background: "rgba(0,0,0,0.12)",
-                  }}
-                >
-                  {selectedContext.slice.map((m) => {
-                    const isSel = m.id === selected.id;
-                    return (
-                      <div
-                        key={m.id}
-                        id={`ctx-${selected.fileId}-${m.id}`}
-                        style={{
-                          padding: "10px 10px",
-                          borderBottom: "1px solid rgba(36,49,64,0.55)",
-                          background: isSel ? "rgba(106, 166, 255, 0.14)" : "transparent",
-                        }}
-                      >
-                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                          <strong>{m.sender}</strong>
-                          <span style={{ color: "var(--muted)" }}>{m.timestampRaw || ""}</span>
-                        </div>
-                        <div style={{ marginTop: 6, whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
-                          <HighlightedText text={m.text} query={isSel ? q : ""} />
-                        </div>
-                      </div>
-                    );
-                  })}
+                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                  <HighlightedText text={selected.text} query={q} />
+                </div>
+
+                <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>
+                  Tip: this opens the full file view and scrolls to the matched message.
                 </div>
               </>
             )}
@@ -1134,6 +1075,41 @@ export function HtmlSearchApp() {
           from IndexedDB on demand.
         </small>
       </footer>
+
+      <style jsx>{`
+        .container {
+          max-width: 980px;
+          width: 100%;
+          margin: 0 auto;
+          padding: 0 12px;
+        }
+        @media (min-width: 1000px) {
+          .container {
+            padding: 0;
+          }
+        }
+        .searchGrid {
+          display: grid;
+          grid-template-columns: 1.6fr 1fr 1fr 1fr 1fr 1fr auto;
+          gap: 10px;
+        }
+        @media (max-width: 900px) {
+          .searchGrid {
+            grid-template-columns: 1fr;
+          }
+        }
+        .resultsGrid {
+          margin-top: 10px;
+          display: grid;
+          grid-template-columns: 1fr 1.2fr;
+          gap: 12px;
+        }
+        @media (max-width: 900px) {
+          .resultsGrid {
+            grid-template-columns: 1fr;
+          }
+        }
+      `}</style>
     </div>
   );
 }
