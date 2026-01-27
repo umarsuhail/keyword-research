@@ -788,10 +788,11 @@ export function HtmlSearchApp() {
       >
         <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>2) Search</h2>
 
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 12 }}>
-          <label style={{ color: "var(--muted)" }}>
+        <div className="searchHeaderRow">
+          <label className="activeDatasetLabel" style={{ color: "var(--muted)" }}>
             Active dataset:
             <select
+              className="datasetSelect"
               value={fileId ?? ""}
               onChange={(e) => {
                 const next = e.target.value;
@@ -823,7 +824,7 @@ export function HtmlSearchApp() {
             </select>
           </label>
 
-          <label style={{ color: "var(--muted)", display: "flex", alignItems: "center", gap: 8 }}>
+          <label className="scopeToggle" style={{ color: "var(--muted)", display: "flex", alignItems: "center", gap: 8 }}>
             <input
               type="checkbox"
               checked={searchScope === "all"}
@@ -993,7 +994,15 @@ export function HtmlSearchApp() {
                       )}
                       <span style={{ color: "var(--muted)" }}>{r.timestampRaw || ""}</span>
                     </div>
-                    <div style={{ marginTop: 6, whiteSpace: "pre-wrap", color: "var(--foreground)" }}>
+                    <div
+                      style={{
+                        marginTop: 6,
+                        whiteSpace: "pre-wrap",
+                        color: "var(--foreground)",
+                        overflowWrap: "anywhere",
+                        wordBreak: "break-word",
+                      }}
+                    >
                       <HighlightedText text={r.snippet} query={q} />
                     </div>
                   </button>
@@ -1032,6 +1041,7 @@ export function HtmlSearchApp() {
                     marginBottom: 10,
                     alignItems: "center",
                   }}
+                  className="selectedHeader"
                 >
                   <strong>{selected.sender}</strong>
                   {searchScope === "all" && (
@@ -1039,12 +1049,12 @@ export function HtmlSearchApp() {
                   )}
                   <span style={{ color: "var(--muted)" }}>{selected.timestampRaw || ""}</span>
                   <button
+                    className="openAtButton"
                     onClick={() => {
                       setReadableAnchorId(selected.id);
                       setView("readable");
                     }}
                     style={{
-                      marginLeft: "auto",
                       padding: "6px 10px",
                       borderRadius: 10,
                       border: "1px solid var(--border)",
@@ -1057,7 +1067,14 @@ export function HtmlSearchApp() {
                   </button>
                 </div>
 
-                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.5 }}>
+                <div
+                  style={{
+                    whiteSpace: "pre-wrap",
+                    lineHeight: 1.5,
+                    overflowWrap: "anywhere",
+                    wordBreak: "break-word",
+                  }}
+                >
                   <HighlightedText text={selected.text} query={q} />
                 </div>
 
@@ -1070,7 +1087,7 @@ export function HtmlSearchApp() {
         </div>
 
         {total > limit && (
-          <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+          <div className="paginationRow" style={{ marginTop: 12, display: "flex", gap: 10 }}>
             <button
               onClick={() => search(Math.max(0, offset - limit))}
               disabled={searching || offset === 0}
@@ -1130,9 +1147,74 @@ export function HtmlSearchApp() {
           grid-template-columns: 1.6fr 1fr 1fr 1fr 1fr 1fr auto;
           gap: 10px;
         }
-        @media (max-width: 900px) {
+        @media (max-width: 980px) {
           .searchGrid {
             grid-template-columns: 1fr;
+          }
+        }
+
+        .searchHeaderRow {
+          display: flex;
+          gap: 12px;
+          flex-wrap: wrap;
+          margin-bottom: 12px;
+        }
+
+        .activeDatasetLabel {
+          display: flex;
+          align-items: center;
+          flex-wrap: wrap;
+          gap: 8px;
+        }
+
+        .datasetSelect {
+          max-width: 100%;
+        }
+
+        .selectedHeader {
+          display: flex;
+          gap: 10px;
+          flex-wrap: wrap;
+          align-items: center;
+        }
+
+        .openAtButton {
+          margin-left: auto;
+        }
+
+        .paginationRow {
+          flex-wrap: wrap;
+          align-items: center;
+        }
+
+        @media (max-width: 600px) {
+          .searchHeaderRow {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .activeDatasetLabel {
+            flex-direction: column;
+            align-items: stretch;
+          }
+
+          .activeDatasetLabel select {
+            margin-left: 0 !important;
+            width: 100%;
+          }
+
+          .scopeToggle {
+            align-items: flex-start;
+          }
+
+          .selectedHeader {
+            flex-direction: column;
+            align-items: flex-start;
+          }
+
+          .openAtButton {
+            margin-left: 0;
+            width: 100%;
           }
         }
         .resultsGrid {
@@ -1141,7 +1223,7 @@ export function HtmlSearchApp() {
           grid-template-columns: 1fr 1.2fr;
           gap: 12px;
         }
-        @media (max-width: 900px) {
+        @media (max-width: 980px) {
           .resultsGrid {
             grid-template-columns: 1fr;
           }
