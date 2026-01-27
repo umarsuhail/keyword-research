@@ -145,6 +145,7 @@ export function HtmlSearchApp() {
   const [offset, setOffset] = useState<number>(0);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [view, setView] = useState<"parsed" | "original" | "readable">("parsed");
+  const [tocMode, setTocMode] = useState<"filtered" | "full">("filtered");
 
   const [messages, setMessages] = useState<
     Array<{
@@ -230,9 +231,10 @@ export function HtmlSearchApp() {
     setReadableIframeSrc(null);
     if (!fileId || !meta) return;
 
-    // Full file view must include ALL messages for the dataset (no filtering),
-    // but we still want to highlight all matches for the current query.
-    const { total, results } = searchMessages(messages, {
+    const fromMs = parseDateMs(from, "start");
+    const toMs = parseDateMs(to, "end");
+
+    const fullHits = searchMessages(messages, {
       q,
       exclude,
       matchMode,
@@ -240,6 +242,20 @@ export function HtmlSearchApp() {
       // Best-effort: include all hits in TOC; rendering full file is handled separately.
       limit: Math.max(1, messages.length),
     });
+
+    const filteredHits = searchMessages(messages, {
+      q,
+      exclude,
+      matchMode,
+      sender: sender || undefined,
+      fromMs,
+      toMs,
+      offset: 0,
+      // Best-effort: include all hits in TOC; rendering full file is handled separately.
+      limit: Math.max(1, messages.length),
+    });
+
+    const activeHits = tocMode === "full" ? fullHits : filteredHits;
 
     const title = `File View — ${meta.originalName}`;
 
@@ -259,9 +275,9 @@ export function HtmlSearchApp() {
       .filter(Boolean)
       .join(" · ");
 
-    const matchIds = new Set(results.map((r) => r.id));
+    const matchIds = new Set(activeHits.results.map((r) => r.id));
 
-    const toc = results
+    const toc = activeHits.results
       .map((r) => {
         const ts = escapeHtml(r.timestampRaw || "");
         const senderEsc = escapeHtml(r.sender);
@@ -327,12 +343,12 @@ export function HtmlSearchApp() {
     <aside class=\"side\">
       <div class=\"head\">
         <h1>${escapeHtml(meta.originalName)}</h1>
-        <div class=\"sub\">Matches in file: ${total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
+        <div class=\"sub\">TOC: ${tocMode === "full" ? "full-file" : "filtered"} (${activeHits.total}) · Full-file matches: ${fullHits.total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
         ${resultsSummary ? `<div class=\"sub\">Results filters (left panel): ${resultsSummary}</div>` : ""}
         <div class=\"sub\">Tip: click a match to jump</div>
       </div>
       <nav class=\"toc\">
-        ${toc || `<div style=\"padding:10px;color:var(--muted)\">No matches.</div>`}
+        ${toc || `<div style=\"padding:10px;color:var(--muted)\">No matches for this TOC mode.</div>`}
       </nav>
     </aside>
     <main class=\"main\">
@@ -353,7 +369,7 @@ export function HtmlSearchApp() {
       URL.revokeObjectURL(url);
       if (readableObjectUrlRef.current === url) readableObjectUrlRef.current = null;
     };
-  }, [fileId, meta, messages, q, exclude, matchMode, sender, from, to]);
+  }, [fileId, meta, messages, q, exclude, matchMode, sender, from, to, tocMode]);
 
   useEffect(() => {
     readableAnchorIdRef.current = readableAnchorId;
@@ -663,6 +679,32 @@ export function HtmlSearchApp() {
                 }}
               >
                 {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <span style={{ color: "var(--muted)" }}>File View TOC:</span>
+            {(
+              [
+                { key: "filtered", label: "Filtered" },
+                { key: "full", label: "Full-file" },
+              ] as const
+            ).map((m) => (
+              <button
+                key={m.key}
+                onClick={() => setTocMode(m.key)}
+                style={{
+                  padding: "8px 12px",
+                  borderRadius: 10,
+                  border: "1px solid var(--border)",
+                  background:
+                    tocMode === m.key ? "rgba(106, 166, 255, 0.12)" : "var(--surface-2)",
+                  color: "var(--foreground)",
+                  cursor: "pointer",
+                }}
+              >
+                {m.label}
               </button>
             ))}
           </div>
