@@ -230,24 +230,28 @@ export function HtmlSearchApp() {
     setReadableIframeSrc(null);
     if (!fileId || !meta) return;
 
-    const fromMs = parseDateMs(from, "start");
-    const toMs = parseDateMs(to, "end");
-
+    // Full file view must include ALL messages for the dataset (no filtering),
+    // but we still want to highlight all matches for the current query.
     const { total, results } = searchMessages(messages, {
       q,
       exclude,
       matchMode,
-      sender: sender || undefined,
-      fromMs,
-      toMs,
       offset: 0,
-      limit: 5000,
+      // Best-effort: include all hits in TOC; rendering full file is handled separately.
+      limit: Math.max(1, messages.length),
     });
 
     const title = `File View — ${meta.originalName}`;
 
     const filterSummary = [
       q.trim() ? `q=\"${escapeHtml(q.trim())}\"` : null,
+      exclude.trim() ? `exclude=\"${escapeHtml(exclude.trim())}\"` : null,
+      matchMode ? `mode=${escapeHtml(matchMode)}` : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
+
+    const resultsSummary = [
       sender ? `sender=\"${escapeHtml(sender)}\"` : null,
       from ? `from=${escapeHtml(from)}` : null,
       to ? `to=${escapeHtml(to)}` : null,
@@ -266,25 +270,15 @@ export function HtmlSearchApp() {
       })
       .join("\n");
 
-    const filtered = messages
-      .filter((m) => {
-        if (sender && m.sender !== sender) return false;
-        if (typeof fromMs === "number" && typeof m.timestampMs === "number" && m.timestampMs < fromMs)
-          return false;
-        if (typeof toMs === "number" && typeof m.timestampMs === "number" && m.timestampMs > toMs)
-          return false;
-        return true;
-      })
-      .slice();
-
+    const ordered = messages.slice();
     // Oldest first (unknown timestamps at end)
-    filtered.sort((a, b) => {
+    ordered.sort((a, b) => {
       const av = typeof a.timestampMs === "number" ? a.timestampMs : Number.POSITIVE_INFINITY;
       const bv = typeof b.timestampMs === "number" ? b.timestampMs : Number.POSITIVE_INFINITY;
       return av - bv;
     });
 
-    const body = filtered
+    const body = ordered
       .map((m) => {
         const ts = escapeHtml(m.timestampRaw || "");
         const senderEsc = escapeHtml(m.sender);
@@ -333,7 +327,8 @@ export function HtmlSearchApp() {
     <aside class=\"side\">
       <div class=\"head\">
         <h1>${escapeHtml(meta.originalName)}</h1>
-        <div class=\"sub\">Matches: ${total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
+        <div class=\"sub\">Matches in file: ${total}${filterSummary ? ` · ${filterSummary}` : ""}</div>
+        ${resultsSummary ? `<div class=\"sub\">Results filters (left panel): ${resultsSummary}</div>` : ""}
         <div class=\"sub\">Tip: click a match to jump</div>
       </div>
       <nav class=\"toc\">
