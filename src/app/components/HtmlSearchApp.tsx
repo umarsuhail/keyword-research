@@ -563,9 +563,9 @@ export function HtmlSearchApp() {
   <title>${escapeHtml(title)}</title>
   <style>
     :root{color-scheme:dark;--bg:#0b0f14;--fg:#f2f4f8;--muted:#a9b2c0;--border:#243140;--surface:#121922;--surface2:#0f141b;--accent:#6aa6ff}
-    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif}
+    body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;overflow-x:auto}
     a{color:inherit;text-decoration:none}
-    .wrap{display:grid;grid-template-columns:360px 1fr;min-height:100vh}
+    .wrap{display:grid;grid-template-columns:360px 1fr;min-height:100vh;min-width:980px}
     .side{border-right:1px solid var(--border);background:var(--surface2);position:sticky;top:0;align-self:start;height:100vh;overflow:auto}
     .main{padding:18px 18px 60px}
     .head{padding:14px 14px;border-bottom:1px solid var(--border)}
@@ -585,7 +585,6 @@ export function HtmlSearchApp() {
     .links{margin-top:8px;display:flex;flex-wrap:wrap;gap:8px}
     .link{display:inline-block;padding:4px 8px;border:1px solid rgba(36,49,64,.65);border-radius:999px;color:var(--fg);background:rgba(106,166,255,.08)}
     mark{background:rgba(106,166,255,.25);color:var(--fg);padding:0 2px;border-radius:4px}
-    @media (max-width: 980px){.wrap{grid-template-columns:1fr}.side{position:relative;height:auto}.main{padding:14px}}
   </style>
 </head>
 <body>
@@ -926,7 +925,8 @@ export function HtmlSearchApp() {
   }, []);
 
   return (
-    <div className="container">
+    <div className="pageScroll">
+      <div className="container">
       <header style={{ padding: "28px 0 12px" }}>
         <h1 style={{ fontSize: 28, margin: 0 }}>HTML Message Search</h1>
         <p style={{ margin: "8px 0 0", color: "var(--muted)" }}>
@@ -1060,8 +1060,9 @@ export function HtmlSearchApp() {
             search(0);
           }}
         >
-          <div className="searchGrid">
-            <input
+          <div className="gridScroll">
+            <div className="searchGrid">
+              <input
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="Keyword(s)"
@@ -1074,8 +1075,8 @@ export function HtmlSearchApp() {
                 color: "var(--foreground)",
                 fontSize: 16,
               }}
-            />
-            <input
+              />
+              <input
               value={exclude}
               onChange={(e) => setExclude(e.target.value)}
               placeholder='Exclude text (optional)'
@@ -1088,8 +1089,8 @@ export function HtmlSearchApp() {
                 color: "var(--foreground)",
                 fontSize: 16,
               }}
-            />
-            <select
+              />
+              <select
               value={sender}
               onChange={(e) => setSender(e.target.value)}
               disabled={!canSearch}
@@ -1101,15 +1102,15 @@ export function HtmlSearchApp() {
                 color: "var(--foreground)",
                 fontSize: 16,
               }}
-            >
-              <option value="">All senders</option>
-              {senders.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
-            <select
+              >
+                <option value="">All senders</option>
+                {senders.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))}
+              </select>
+              <select
               value={matchMode}
               onChange={(e) => setMatchMode((e.target.value as "substring" | "word") ?? "substring")}
               disabled={!canSearch}
@@ -1121,11 +1122,11 @@ export function HtmlSearchApp() {
                 color: "var(--foreground)",
                 fontSize: 16,
               }}
-            >
-              <option value="substring">Substring match</option>
-              <option value="word">Whole word only</option>
-            </select>
-            <input
+              >
+                <option value="substring">Substring match</option>
+                <option value="word">Whole word only</option>
+              </select>
+              <input
               type="date"
               value={from}
               onChange={(e) => setFrom(e.target.value)}
@@ -1138,8 +1139,8 @@ export function HtmlSearchApp() {
                 color: "var(--foreground)",
                 fontSize: 16,
               }}
-            />
-            <input
+              />
+              <input
               type="date"
               value={to}
               onChange={(e) => setTo(e.target.value)}
@@ -1152,8 +1153,8 @@ export function HtmlSearchApp() {
                 color: "var(--foreground)",
                 fontSize: 16,
               }}
-            />
-            <button
+              />
+              <button
               type="submit"
               disabled={!canSearch || searching}
               style={{
@@ -1165,9 +1166,10 @@ export function HtmlSearchApp() {
                 cursor: searching ? "not-allowed" : "pointer",
                 minHeight: 44,
               }}
-            >
-              {searching ? "Searching…" : "Search"}
-            </button>
+              >
+                {searching ? "Searching…" : "Search"}
+              </button>
+            </div>
           </div>
 
           <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -1198,9 +1200,10 @@ export function HtmlSearchApp() {
           <strong>Matches:</strong> {total}
         </div>
 
-        <div
-          className="resultsGrid"
-        >
+        <div className="gridScroll">
+          <div
+            className="resultsGrid"
+          >
           <div
             style={{
               border: "1px solid var(--border)",
@@ -1278,6 +1281,7 @@ export function HtmlSearchApp() {
               padding: 12,
               minHeight: 200,
             }}
+            className="resultsPanel"
           >
             <div style={{ color: "var(--muted)", marginBottom: 8 }}>Selected result</div>
 
@@ -1342,16 +1346,35 @@ export function HtmlSearchApp() {
                     lineHeight: 1.5,
                     overflowWrap: "anywhere",
                     wordBreak: "break-word",
+                    marginBottom: 10,
                   }}
                 >
                   <HighlightedText text={selected.text} query={q} />
                 </div>
 
+                {readableIframeSrc ? (
+                  <iframe
+                    title="File preview"
+                    sandbox="allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+                    className="previewFrame"
+                    style={{
+                      width: "100%",
+                      border: "1px solid var(--border)",
+                      borderRadius: 12,
+                      background: "var(--surface-2)",
+                    }}
+                    src={readableIframeSrc}
+                  />
+                ) : (
+                  <div style={{ color: "var(--muted)" }}>Loading file preview…</div>
+                )}
+
                 <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>
-                  Tip: this opens the full file view and scrolls to the matched message.
+                  Tip: the preview shows the full file (before and after the match) and scrolls to the selected message.
                 </div>
               </>
             )}
+          </div>
           </div>
         </div>
 
@@ -1580,11 +1603,16 @@ export function HtmlSearchApp() {
       </footer>
 
       <style jsx>{`
+        .pageScroll {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+        }
         .container {
           max-width: 980px;
           width: 100%;
           margin: 0 auto;
           padding: 0 12px;
+          min-width: 980px;
         }
         @media (min-width: 1000px) {
           .container {
@@ -1595,11 +1623,12 @@ export function HtmlSearchApp() {
           display: grid;
           grid-template-columns: 1.6fr 1fr 1fr 1fr 1fr 1fr auto;
           gap: 10px;
+          min-width: 860px;
         }
-        @media (max-width: 980px) {
-          .searchGrid {
-            grid-template-columns: 1fr;
-          }
+
+        .gridScroll {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
         }
 
         .searchHeaderRow {
@@ -1636,60 +1665,31 @@ export function HtmlSearchApp() {
           align-items: center;
         }
 
-        @media (max-width: 600px) {
-          .searchHeaderRow {
-            flex-direction: column;
-            align-items: stretch;
-          }
-
-          .activeDatasetLabel {
-            flex-direction: column;
-            align-items: stretch;
-          }
-
-          .activeDatasetLabel select {
-            margin-left: 0 !important;
-            width: 100%;
-          }
-
-          .scopeToggle {
-            align-items: flex-start;
-          }
-
-          .selectedHeader {
-            flex-direction: column;
-            align-items: flex-start;
-          }
-
-          .openAtButton {
-            margin-left: 0;
-            width: 100%;
-          }
-        }
         .resultsGrid {
           margin-top: 10px;
           display: grid;
-          grid-template-columns: 1fr 1.2fr;
+          grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr);
           gap: 12px;
+          min-width: 860px;
         }
-        @media (max-width: 980px) {
-          .resultsGrid {
-            grid-template-columns: 1fr;
-          }
+
+        .resultsPanel {
+          display: flex;
+          flex-direction: column;
+          gap: 10px;
+        }
+
+        .previewFrame {
+          height: min(60vh, 520px);
         }
 
         .resultsListScroll {
-          max-height: 420px;
+          max-height: 55vh;
           overflow: auto;
           -webkit-overflow-scrolling: touch;
         }
-
-        @media (max-width: 600px) {
-          .resultsListScroll {
-            max-height: 55vh;
-          }
-        }
       `}</style>
+    </div>
     </div>
   );
 }
