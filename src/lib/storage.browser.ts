@@ -1,13 +1,21 @@
 import type { ParsedFileMeta, ParsedMessage } from "./types";
 
 const DB_NAME = "html-message-search";
-const DB_VERSION = 2;
+const DB_VERSION = 3;
+
+export type StoredAsset = {
+  key: string;
+  name: string;
+  type: string;
+  blob: Blob;
+};
 
 type StoredFile = {
   fileId: string;
   meta: ParsedFileMeta;
   messages: ParsedMessage[];
   originals?: Array<{ name: string; html: string }>;
+  assets?: StoredAsset[];
   // Back-compat (DB v1)
   originalHtml?: string;
 };
@@ -68,6 +76,7 @@ export async function saveParsedFileBrowser(args: {
   originalName: string;
   messages: ParsedMessage[];
   originals: Array<{ name: string; html: string }>;
+  assets?: StoredAsset[];
 }): Promise<ParsedFileMeta> {
   const meta = computeMeta(args);
 
@@ -80,6 +89,7 @@ export async function saveParsedFileBrowser(args: {
     meta,
     messages: args.messages,
     originals: args.originals,
+    assets: args.assets,
   } satisfies StoredFile);
 
   await txDone(tx);
@@ -91,6 +101,7 @@ export async function loadParsedFileBrowser(fileId: string): Promise<{
   meta: ParsedFileMeta;
   messages: ParsedMessage[];
   originals: Array<{ name: string; html: string }>;
+  assets: StoredAsset[];
 }> {
   const db = await openDb();
   const tx = db.transaction(["files"], "readonly");
@@ -111,7 +122,7 @@ export async function loadParsedFileBrowser(fileId: string): Promise<{
         ? [{ name: value.meta.originalName, html: value.originalHtml }]
         : [];
 
-  return { meta: value.meta, messages: value.messages, originals };
+  return { meta: value.meta, messages: value.messages, originals, assets: value.assets ?? [] };
 }
 
 export async function listStoredFilesBrowser(): Promise<ParsedFileMeta[]> {

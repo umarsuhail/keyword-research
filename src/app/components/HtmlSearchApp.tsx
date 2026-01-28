@@ -9,6 +9,7 @@ import {
   loadParsedFileBrowser,
   saveParsedFileBrowser,
 } from "@/lib/storage.browser";
+import type { StoredAsset } from "@/lib/storage.browser";
 
 type UploadMeta = {
   fileId: string;
@@ -24,6 +25,7 @@ type SearchHit = {
   key: string;
   fileId: string;
   fileName: string;
+  messageIndex: number | null;
   id: string;
   sender: string;
   timestampRaw: string;
@@ -31,6 +33,74 @@ type SearchHit = {
   text: string;
   snippet: string;
 };
+
+type AccordionKey = "upload" | "search" | "viewer";
+
+function AccordionSection(args: {
+  id: AccordionKey;
+  title: string;
+  subtitle?: string;
+  disabled?: boolean;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <section
+      style={{
+        border: "1px solid var(--border)",
+        borderRadius: 12,
+        overflow: "hidden",
+        background: "var(--surface)",
+        opacity: args.disabled ? 0.55 : 1,
+      }}
+    >
+      <button
+        type="button"
+        disabled={Boolean(args.disabled)}
+        onClick={() => {
+          if (!args.disabled) args.onToggle();
+        }}
+        style={{
+          width: "100%",
+          textAlign: "left",
+          padding: "16px 14px",
+          border: "none",
+          background: "transparent",
+          cursor: args.disabled ? "not-allowed" : "pointer",
+          display: "flex",
+          gap: 12,
+          alignItems: "baseline",
+          justifyContent: "space-between",
+          minHeight: 52,
+        }}
+        aria-expanded={args.open}
+        aria-controls={`section-${args.id}`}
+      >
+        <div>
+          <div style={{ fontSize: 16, fontWeight: 700, margin: 0, color: "var(--foreground)" }}>{args.title}</div>
+          {args.subtitle ? (
+            <div style={{ marginTop: 4, fontSize: 12, color: "var(--muted)" }}>{args.subtitle}</div>
+          ) : null}
+        </div>
+        <div style={{ color: "var(--muted)", fontSize: 12, flexShrink: 0 }}>{args.open ? "Hide" : "Show"}</div>
+      </button>
+
+      {args.open && (
+        <div
+          id={`section-${args.id}`}
+          style={{
+            borderTop: "1px solid var(--border)",
+            padding: 14,
+            background: "var(--surface)",
+          }}
+        >
+          {args.children}
+        </div>
+      )}
+    </section>
+  );
+}
 
 function parseDateMs(value: string, mode: "start" | "end"): number | undefined {
   if (!value) return undefined;
@@ -53,6 +123,68 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function isLikelyHtmlFile(file: File): boolean {
+  const name = (file.name ?? "").toLowerCase();
+  if (name.endsWith(".html") || name.endsWith(".htm")) return true;
+  const type = (file.type ?? "").toLowerCase();
+  return type.includes("text/html");
+}
+
+function isExternalUrl(href: string): boolean {
+  const v = href.trim().toLowerCase();
+  return v.startsWith("http://") || v.startsWith("https://");
+}
+
+function isIgnorableHref(href: string): boolean {
+  const v = href.trim().toLowerCase();
+  if (!v) return true;
+  return (
+    v.startsWith("#") ||
+    v.startsWith("data:") ||
+    v.startsWith("mailto:") ||
+    v.startsWith("tel:") ||
+    v.startsWith("javascript:")
+  );
+}
+
+function extractUrls(text: string): string[] {
+  const re = /https?:\/\/[^\s<>"]+/gi;
+  const found = text.match(re) ?? [];
+  const uniq = new Set(found.map((u) => u.replace(/[).,;]+$/g, "")));
+  return Array.from(uniq);
+}
+
+function findLocalRefsInHtml(html: string): string[] {
+  const refs: string[] = [];
+  const re = /(src|href)=("|')([^"']+)(\2)/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(html))) {
+    const raw = (m[3] ?? "").trim();
+    if (!raw || isIgnorableHref(raw) || isExternalUrl(raw)) continue;
+    refs.push(raw);
+  }
+  return Array.from(new Set(refs));
+}
+
+function fileKey(file: File): string {
+  const withRel = file as File & { webkitRelativePath?: string };
+  const rel = typeof withRel.webkitRelativePath === "string" ? withRel.webkitRelativePath : "";
+  return (rel || file.name || "").toString();
+}
+
+function buildAssetAliasMap(assets: StoredAsset[]): Map<string, StoredAsset> {
+  const map = new Map<string, StoredAsset>();
+  for (const a of assets) {
+    const key = (a.key ?? "").toLowerCase();
+    const name = (a.name ?? "").toLowerCase();
+    const base = (a.name ?? "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
+    if (key) map.set(key, a);
+    if (name) map.set(name, a);
+    if (base) map.set(base, a);
+  }
+  return map;
 }
 
 function highlightHtml(text: string, q: string): string {
@@ -124,6 +256,11 @@ export function HtmlSearchApp() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploadNote, setUploadNote] = useState<string | null>(null);
+  const [replaceOnName, setReplaceOnName] = useState(true);
+
+  const [openSections, setOpenSections] = useState<Set<AccordionKey>>(
+    () => new Set<AccordionKey>(["upload", "search"]),
+  );
 
   const [storedFiles, setStoredFiles] = useState<UploadMeta[]>([]);
   const [searchScope, setSearchScope] = useState<"active" | "all">("active");
@@ -158,18 +295,58 @@ export function HtmlSearchApp() {
     }>
   >([]);
   const [originals, setOriginals] = useState<Array<{ name: string; html: string }>>([]);
+  const [assets, setAssets] = useState<StoredAsset[]>([]);
   const [originalIndex, setOriginalIndex] = useState<number>(0);
 
   const [originalIframeSrc, setOriginalIframeSrc] = useState<string | null>(null);
   const [readableIframeSrc, setReadableIframeSrc] = useState<string | null>(null);
   const [readableAnchorId, setReadableAnchorId] = useState<string | null>(null);
   const originalObjectUrlRef = useRef<string | null>(null);
+  const originalAssetObjectUrlsRef = useRef<string[]>([]);
   const readableObjectUrlRef = useRef<string | null>(null);
   const readableAnchorIdRef = useRef<string | null>(null);
+  const parsedListRef = useRef<HTMLDivElement | null>(null);
 
   const limit = 50;
 
   const canSearch = searchScope === "all" ? storedFiles.length > 0 : Boolean(fileId);
+
+  const toggleSection = useCallback((key: AccordionKey) => {
+    setOpenSections((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }, []);
+
+  const ensureSectionOpen = useCallback((key: AccordionKey) => {
+    setOpenSections((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  }, []);
+
+  const orderedMessages = useMemo(() => {
+    const ordered = messages.slice();
+    // Oldest first (unknown timestamps at end)
+    ordered.sort((a, b) => {
+      const av = typeof a.timestampMs === "number" ? a.timestampMs : Number.POSITIVE_INFINITY;
+      const bv = typeof b.timestampMs === "number" ? b.timestampMs : Number.POSITIVE_INFINITY;
+      return av - bv;
+    });
+    return ordered;
+  }, [messages]);
+
+  const indexById = useMemo(() => {
+    const map = new Map<string, number>();
+    for (let i = 0; i < orderedMessages.length; i++) {
+      map.set(orderedMessages[i]!.id, i + 1);
+    }
+    return map;
+  }, [orderedMessages]);
 
   const senders = useMemo(() => {
     if (searchScope === "all") {
@@ -191,8 +368,10 @@ export function HtmlSearchApp() {
     setMeta(loaded.meta as UploadMeta);
     setMessages(loaded.messages);
     setOriginals(loaded.originals);
+    setAssets(loaded.assets ?? []);
     setOriginalIndex(0);
-  }, []);
+    ensureSectionOpen("viewer");
+  }, [ensureSectionOpen]);
 
   useEffect(() => {
     // Populate stored datasets on first load.
@@ -216,16 +395,78 @@ export function HtmlSearchApp() {
     setOriginalIframeSrc(null);
     if (!selectedOriginal?.html) return;
 
-    const blob = new Blob([selectedOriginal.html], { type: "text/html" });
+    // Re-write HTML so local attachments (images/videos/etc) can render from IndexedDB blobs.
+    // Also ensure external links open in a new tab.
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(selectedOriginal.html, "text/html");
+    const aliasMap = buildAssetAliasMap(assets);
+
+    // Clean up previous asset object URLs.
+    for (const u of originalAssetObjectUrlsRef.current) {
+      URL.revokeObjectURL(u);
+    }
+    originalAssetObjectUrlsRef.current = [];
+
+    const makeBlobUrlFor = (ref: string): string | null => {
+      const raw = ref.trim();
+      if (!raw || isIgnorableHref(raw) || isExternalUrl(raw)) return null;
+      const lower = raw.toLowerCase();
+      const base = raw.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+      const match = aliasMap.get(lower) ?? aliasMap.get(base);
+      if (!match) return null;
+      const url = URL.createObjectURL(match.blob);
+      originalAssetObjectUrlsRef.current.push(url);
+      return url;
+    };
+
+    // Update anchors.
+    for (const a of Array.from(doc.querySelectorAll("a[href]"))) {
+      const href = a.getAttribute("href") ?? "";
+      if (!href) continue;
+      if (isExternalUrl(href)) {
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+        continue;
+      }
+      const blobUrl = makeBlobUrlFor(href);
+      if (blobUrl) {
+        a.setAttribute("href", blobUrl);
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+      }
+    }
+
+    // Update common media elements.
+    for (const el of Array.from(doc.querySelectorAll("img[src], video[src], audio[src], source[src]"))) {
+      const src = el.getAttribute("src") ?? "";
+      if (!src) continue;
+      const blobUrl = makeBlobUrlFor(src);
+      if (blobUrl) {
+        el.setAttribute("src", blobUrl);
+      }
+    }
+
+    // Some exports use <video><source src=...></video> with controls missing.
+    for (const v of Array.from(doc.querySelectorAll("video"))) {
+      if (!v.getAttribute("controls")) v.setAttribute("controls", "");
+    }
+
+    const serialized = `<!doctype html>\n${doc.documentElement.outerHTML}`;
+
+    const blob = new Blob([serialized], { type: "text/html" });
     const url = URL.createObjectURL(blob);
     originalObjectUrlRef.current = url;
     setOriginalIframeSrc(url);
 
     return () => {
       URL.revokeObjectURL(url);
+      for (const u of originalAssetObjectUrlsRef.current) {
+        URL.revokeObjectURL(u);
+      }
+      originalAssetObjectUrlsRef.current = [];
       if (originalObjectUrlRef.current === url) originalObjectUrlRef.current = null;
     };
-  }, [selectedOriginal?.html, fileId]);
+  }, [assets, selectedOriginal?.html, fileId]);
 
   useEffect(() => {
     setReadableIframeSrc(null);
@@ -282,28 +523,34 @@ export function HtmlSearchApp() {
         const ts = escapeHtml(r.timestampRaw || "");
         const senderEsc = escapeHtml(r.sender);
         const snip = highlightHtml(r.snippet, q);
-        return `<a class=\"toc-item\" href=\"#m-${r.id}\"><span class=\"who\">${senderEsc}</span><span class=\"ts\">${ts}</span><div class=\"snip\">${snip}</div></a>`;
+        const idx = indexById.get(r.id);
+        const idxHtml = typeof idx === "number" ? `<span class=\"idx\">#${idx}</span>` : "";
+        return `<a class=\"toc-item\" href=\"#m-${r.id}\">${idxHtml}<span class=\"who\">${senderEsc}</span><span class=\"ts\">${ts}</span><div class=\"snip\">${snip}</div></a>`;
       })
       .join("\n");
 
-    const ordered = messages.slice();
-    // Oldest first (unknown timestamps at end)
-    ordered.sort((a, b) => {
-      const av = typeof a.timestampMs === "number" ? a.timestampMs : Number.POSITIVE_INFINITY;
-      const bv = typeof b.timestampMs === "number" ? b.timestampMs : Number.POSITIVE_INFINITY;
-      return av - bv;
-    });
-
-    const body = ordered
+    const body = orderedMessages
       .map((m) => {
         const ts = escapeHtml(m.timestampRaw || "");
         const senderEsc = escapeHtml(m.sender);
         const isHit = matchIds.has(m.id);
         const text = isHit ? highlightHtml(m.text, q) : escapeHtml(m.text);
+        const urls = extractUrls(m.text);
+        const links = urls.length
+          ? `<div class=\"links\">${urls
+              .map(
+                (u) =>
+                  `<a class=\"link\" href=\"${escapeHtml(u)}\" target=\"_blank\" rel=\"noopener noreferrer\">${escapeHtml(u)}</a>`,
+              )
+              .join(" ")}</div>`
+          : "";
+        const idx = indexById.get(m.id);
+        const idxHtml = typeof idx === "number" ? `<span class=\"idx\">#${idx}</span>` : "";
         return `
 <section class=\"msg${isHit ? " hit" : ""}\" id=\"m-${m.id}\">
-  <div class=\"meta\"><span class=\"who\">${senderEsc}</span><span class=\"ts\">${ts}</span></div>
+  <div class=\"meta\">${idxHtml}<span class=\"who\">${senderEsc}</span><span class=\"ts\">${ts}</span></div>
   <div class=\"text\">${text}</div>
+  ${links}
 </section>`;
       })
       .join("\n");
@@ -327,6 +574,7 @@ export function HtmlSearchApp() {
     .toc{padding:10px 10px 18px;display:grid;gap:10px}
     .toc-item{border:1px solid rgba(36,49,64,.65);border-radius:12px;padding:10px 10px;background:transparent}
     .toc-item:hover{background:rgba(106,166,255,.10)}
+    .idx{display:inline-block;margin-right:8px;padding:1px 8px;border:1px solid rgba(36,49,64,.8);border-radius:999px;color:var(--muted);font-size:12px}
     .who{font-weight:700}
     .ts{margin-left:10px;color:var(--muted);font-size:12px}
     .snip{margin-top:6px;color:var(--fg);white-space:pre-wrap}
@@ -334,6 +582,8 @@ export function HtmlSearchApp() {
     .msg.hit{border-color:rgba(106,166,255,.55);box-shadow:0 0 0 1px rgba(106,166,255,.25) inset}
     .msg .meta{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px}
     .msg .text{white-space:pre-wrap}
+    .links{margin-top:8px;display:flex;flex-wrap:wrap;gap:8px}
+    .link{display:inline-block;padding:4px 8px;border:1px solid rgba(36,49,64,.65);border-radius:999px;color:var(--fg);background:rgba(106,166,255,.08)}
     mark{background:rgba(106,166,255,.25);color:var(--fg);padding:0 2px;border-radius:4px}
     @media (max-width: 980px){.wrap{grid-template-columns:1fr}.side{position:relative;height:auto}.main{padding:14px}}
   </style>
@@ -369,7 +619,20 @@ export function HtmlSearchApp() {
       URL.revokeObjectURL(url);
       if (readableObjectUrlRef.current === url) readableObjectUrlRef.current = null;
     };
-  }, [fileId, meta, messages, q, exclude, matchMode, sender, from, to, tocMode]);
+  }, [
+    exclude,
+    fileId,
+    from,
+    indexById,
+    matchMode,
+    messages,
+    meta,
+    orderedMessages,
+    q,
+    sender,
+    to,
+    tocMode,
+  ]);
 
   useEffect(() => {
     readableAnchorIdRef.current = readableAnchorId;
@@ -391,20 +654,66 @@ export function HtmlSearchApp() {
     try {
       const created: UploadMeta[] = [];
 
-      for (const file of files) {
+      const existing = await refreshStoredFiles();
+      const byName = new Map<string, UploadMeta>();
+      for (const m of existing) {
+        byName.set((m.originalName ?? "").trim().toLowerCase(), m);
+      }
+
+      const htmlFiles = files.filter(isLikelyHtmlFile);
+      const assetFiles = files.filter((f) => !isLikelyHtmlFile(f));
+      const assetByKey = new Map<string, File>();
+      for (const f of assetFiles) {
+        const key = fileKey(f).toLowerCase();
+        const name = (f.name || "").toLowerCase();
+        if (key) assetByKey.set(key, f);
+        if (name) assetByKey.set(name, f);
+        const base = (f.name || "").split(/[\\/]/).pop()?.toLowerCase() ?? "";
+        if (base) assetByKey.set(base, f);
+      }
+
+      if (htmlFiles.length === 0) {
+        throw new Error("Please select at least one Instagram export HTML file. (You can also include photos/videos so attachments render.)");
+      }
+
+      for (const file of htmlFiles) {
         const html = await file.text();
         const parsed = parseMessagesFromHtmlBrowser(html);
 
+        const name = file.name ?? "(unknown)";
+        const existingMatch = byName.get(name.trim().toLowerCase());
         const newFileId =
-          typeof crypto?.randomUUID === "function"
-            ? crypto.randomUUID()
-            : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+          replaceOnName && existingMatch
+            ? existingMatch.fileId
+            : typeof crypto?.randomUUID === "function"
+              ? crypto.randomUUID()
+              : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+        const refs = findLocalRefsInHtml(html);
+        const used = new Map<string, File>();
+        for (const r of refs) {
+          const lower = r.toLowerCase();
+          const base = r.split(/[\\/]/).pop()?.toLowerCase() ?? "";
+          const f = assetByKey.get(lower) ?? assetByKey.get(base);
+          if (f) {
+            const k = fileKey(f).toLowerCase();
+            used.set(k, f);
+          }
+        }
+
+        const assetsToStore: StoredAsset[] = Array.from(used.values()).map((f) => ({
+          key: fileKey(f) || f.name,
+          name: f.name,
+          type: f.type || "application/octet-stream",
+          blob: f,
+        }));
 
         const savedMeta = await saveParsedFileBrowser({
           fileId: newFileId,
-          originalName: file.name ?? "(unknown)",
+          originalName: name,
           messages: parsed,
-          originals: [{ name: file.name ?? "(unknown)", html }],
+          originals: [{ name, html }],
+          assets: assetsToStore,
         });
 
         created.push(savedMeta as UploadMeta);
@@ -424,8 +733,8 @@ export function HtmlSearchApp() {
       setSelectedKey(null);
       setUploadNote(
         created.length === 1
-          ? `Saved 1 dataset: ${created[0]?.originalName ?? "(unknown)"}`
-          : `Saved ${created.length} datasets. Use “Search across all stored datasets” to search them together.`,
+          ? `Saved 1 dataset: ${created[0]?.originalName ?? "(unknown)"}${replaceOnName ? " (replaced if name matched)" : ""}`
+          : `Saved ${created.length} datasets.${replaceOnName ? " (replaced any existing name matches)" : ""} Use “Search across all stored datasets” to search them together.`,
       );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -433,7 +742,7 @@ export function HtmlSearchApp() {
     } finally {
       setUploading(false);
     }
-  }, [files, loadActiveFile, refreshStoredFiles]);
+  }, [files, loadActiveFile, refreshStoredFiles, replaceOnName]);
 
   const search = useCallback(
     async (nextOffset: number) => {
@@ -462,6 +771,7 @@ export function HtmlSearchApp() {
             ...r,
             fileId: fileId!,
             fileName: meta?.originalName ?? "(unknown)",
+            messageIndex: indexById.get(r.id) ?? null,
             key: `${fileId!}:${r.id}`,
           }));
 
@@ -488,6 +798,17 @@ export function HtmlSearchApp() {
 
         const merged: SearchHit[] = [];
         for (const entry of loaded) {
+          const ordered = entry.messages.slice();
+          ordered.sort((a, b) => {
+            const av = typeof a.timestampMs === "number" ? a.timestampMs : Number.POSITIVE_INFINITY;
+            const bv = typeof b.timestampMs === "number" ? b.timestampMs : Number.POSITIVE_INFINITY;
+            return av - bv;
+          });
+          const idxById = new Map<string, number>();
+          for (let i = 0; i < ordered.length; i++) {
+            idxById.set(ordered[i]!.id, i + 1);
+          }
+
           const { results } = searchMessages(entry.messages, {
             q,
             exclude,
@@ -503,6 +824,7 @@ export function HtmlSearchApp() {
               ...r,
               fileId: entry.fileId,
               fileName: entry.meta.originalName,
+              messageIndex: idxById.get(r.id) ?? null,
               key: `${entry.fileId}:${r.id}`,
             });
           }
@@ -537,6 +859,7 @@ export function HtmlSearchApp() {
       exclude,
       fileId,
       from,
+      indexById,
       limit,
       matchMode,
       messages,
@@ -559,9 +882,11 @@ export function HtmlSearchApp() {
     async (hit: SearchHit) => {
       setSelectedKey(hit.key);
 
-      // Prime readable view to jump directly to the selected message.
+      // Jump directly to the selected message.
       setReadableAnchorId(hit.id);
       setView("readable");
+      ensureSectionOpen("viewer");
+      ensureSectionOpen("search");
 
       if (hit.fileId && hit.fileId !== fileId) {
         try {
@@ -571,8 +896,34 @@ export function HtmlSearchApp() {
         }
       }
     },
-    [fileId, loadActiveFile],
+    [ensureSectionOpen, fileId, loadActiveFile],
   );
+
+  const jumpToParsed = useCallback((messageId: string) => {
+    ensureSectionOpen("viewer");
+    setView("parsed");
+    requestAnimationFrame(() => {
+      const el = document.getElementById(`pm-${messageId}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      } else if (parsedListRef.current) {
+        parsedListRef.current.scrollTop = 0;
+      }
+    });
+  }, [ensureSectionOpen]);
+
+  const clearSearch = useCallback(() => {
+    setQ("");
+    setExclude("");
+    setSender("");
+    setFrom("");
+    setTo("");
+    setMatchMode("substring");
+    setResults([]);
+    setTotal(0);
+    setOffset(0);
+    setSelectedKey(null);
+  }, []);
 
   return (
     <div className="container">
@@ -583,211 +934,79 @@ export function HtmlSearchApp() {
         </p>
       </header>
 
-      <section
-        style={{
-          border: "1px solid var(--border)",
-          borderRadius: 12,
-          padding: 16,
-          background: "var(--surface)",
-        }}
-      >
-        <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>1) Upload</h2>
-        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-          <input
-            type="file"
-            accept="text/html,.html,.htm"
-            multiple
-            onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
-          />
-          <button
-            onClick={upload}
-            disabled={!files.length || uploading}
-            style={{
-              padding: "8px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: uploading ? "var(--surface-2)" : "#101826",
-              color: uploading ? "var(--muted)" : "var(--foreground)",
-              cursor: uploading ? "not-allowed" : "pointer",
-            }}
-          >
-            {uploading ? "Parsing…" : "Parse in Browser"}
-          </button>
-        </div>
-        {files.length > 1 && (
-          <div style={{ margin: "10px 0 0", color: "var(--muted)" }}>
-            <div>
-              Selected {files.length} files. They will be saved as separate datasets.
-            </div>
-            <div style={{ marginTop: 6, fontSize: 12 }}>
-              {files.map((f) => f.name).join(" · ")}
-            </div>
-          </div>
-        )}
-        {uploadNote && (
-          <p style={{ margin: "10px 0 0", color: "var(--muted)" }}>{uploadNote}</p>
-        )}
-        {uploadError && (
-          <p style={{ margin: "10px 0 0", color: "#b00020" }}>{uploadError}</p>
-        )}
-        {meta && (
-          <div style={{ marginTop: 12, color: "var(--foreground)" }}>
-            <div>
-              <strong>File:</strong> {meta.originalName}
-            </div>
-            <div>
-              <strong>Messages:</strong> {meta.messageCount}
-            </div>
-            <div>
-              <strong>Date range:</strong> {formatRange(meta)}
-            </div>
-          </div>
-        )}
-      </section>
-
-      {fileId && (
-        <section
-          style={{
-            marginTop: 14,
-            border: "1px solid var(--border)",
-            borderRadius: 12,
-            padding: 16,
-            background: "var(--surface)",
-          }}
-        >
-          <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>3) View</h2>
-
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-            {(
-              [
-                { key: "parsed", label: "Parsed" },
-                    { key: "readable", label: "File View" },
-                { key: "original", label: "Original HTML" },
-              ] as const
-            ).map((t) => (
-              <button
-                key={t.key}
-                onClick={() => setView(t.key)}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 10,
-                  border: "1px solid var(--border)",
-                  background:
-                    view === t.key ? "rgba(106, 166, 255, 0.12)" : "var(--surface-2)",
-                  color: "var(--foreground)",
-                  cursor: "pointer",
-                }}
+      <div style={{ display: "grid", gap: 12 }}>
+              <AccordionSection
+                id="upload"
+                title="1) Upload"
+                subtitle={`Select one or more .html exports. Stored locally in your browser. ${storedFiles.length ? `${storedFiles.length} dataset(s) saved.` : ""}`}
+                open={openSections.has("upload")}
+                onToggle={() => toggleSection("upload")}
               >
-                {t.label}
-              </button>
-            ))}
-          </div>
+                <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+                  <input
+                    type="file"
+                    accept="text/html,.html,.htm,image/*,video/*,audio/*"
+                    multiple
+                    onChange={(e) => setFiles(Array.from(e.target.files ?? []))}
+                  />
 
-          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
-            <span style={{ color: "var(--muted)" }}>File View TOC:</span>
-            {(
-              [
-                { key: "filtered", label: "Filtered" },
-                { key: "full", label: "Full-file" },
-              ] as const
-            ).map((m) => (
-              <button
-                key={m.key}
-                onClick={() => setTocMode(m.key)}
-                style={{
-                  padding: "8px 12px",
-                  borderRadius: 10,
-                  border: "1px solid var(--border)",
-                  background:
-                    tocMode === m.key ? "rgba(106, 166, 255, 0.12)" : "var(--surface-2)",
-                  color: "var(--foreground)",
-                  cursor: "pointer",
-                }}
-              >
-                {m.label}
-              </button>
-            ))}
-          </div>
+                  <label style={{ display: "flex", gap: 8, alignItems: "center", color: "var(--muted)" }}>
+                    <input
+                      type="checkbox"
+                      checked={replaceOnName}
+                      onChange={(e) => setReplaceOnName(e.target.checked)}
+                    />
+                    Replace existing dataset if filename matches
+                  </label>
 
-          <div style={{ marginTop: 12 }}>
-            {view === "readable" && (
-              <iframe
-                title="File View"
-                sandbox=""
-                style={{
-                  width: "100%",
-                  height: 540,
-                  border: "1px solid var(--border)",
-                  borderRadius: 12,
-                  background: "var(--surface-2)",
-                }}
-                src={readableIframeSrc ?? "about:blank"}
-              />
-            )}
+                  <button
+                    onClick={upload}
+                    disabled={!files.length || uploading}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 10,
+                      border: "1px solid var(--border)",
+                      background: uploading ? "var(--surface-2)" : "#101826",
+                      color: uploading ? "var(--muted)" : "var(--foreground)",
+                      cursor: uploading ? "not-allowed" : "pointer",
+                    }}
+                  >
+                    {uploading ? "Uploading…" : files.length > 1 ? `Upload ${files.length} files` : "Upload"}
+                  </button>
+                </div>
 
-            {view === "original" && (
-              <>
-                {originals.length > 1 && (
-                  <div style={{ marginBottom: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    <label style={{ color: "var(--muted)" }}>
-                      Original file:
-                      <select
-                        value={String(originalIndex)}
-                        onChange={(e) => setOriginalIndex(Number(e.target.value) || 0)}
-                        style={{
-                          marginLeft: 8,
-                          padding: "8px 10px",
-                          borderRadius: 10,
-                          border: "1px solid var(--border)",
-                          background: "var(--surface-2)",
-                          color: "var(--foreground)",
-                        }}
-                      >
-                        {originals.map((o, idx) => (
-                          <option key={o.name + idx} value={String(idx)}>
-                            {o.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
+                {files.length > 0 && (
+                  <div style={{ marginTop: 10, color: "var(--muted)", fontSize: 12 }}>
+                    Selected: {files.length} file(s). Tip: include media files from the export so attachments render.
                   </div>
                 )}
-                <iframe
-                  title="Original HTML"
-                  sandbox=""
-                  style={{
-                    width: "100%",
-                    height: 540,
-                    border: "1px solid var(--border)",
-                    borderRadius: 12,
-                    background: "#fff",
-                  }}
-                  src={originalIframeSrc ?? "about:blank"}
-                />
-              </>
-            )}
 
-            {view === "parsed" && (
-              <div style={{ color: "var(--muted)" }}>
-                Use the Search section below to browse parsed messages.
-              </div>
-            )}
-          </div>
-        </section>
-      )}
+                {uploadNote && <p style={{ margin: "10px 0 0", color: "var(--muted)" }}>{uploadNote}</p>}
+                {uploadError && <p style={{ margin: "10px 0 0", color: "#b00020" }}>{uploadError}</p>}
 
-      <section
-        style={{
-          marginTop: 14,
-          border: "1px solid var(--border)",
-          borderRadius: 12,
-          padding: 16,
-          background: "var(--surface)",
-          opacity: canSearch ? 1 : 0.6,
-        }}
-      >
-        <h2 style={{ fontSize: 16, margin: "0 0 12px" }}>2) Search</h2>
+                {meta && (
+                  <div style={{ marginTop: 12, color: "var(--foreground)" }}>
+                    <div>
+                      <strong>Active dataset:</strong> {meta.originalName}
+                    </div>
+                    <div>
+                      <strong>Messages:</strong> {meta.messageCount}
+                    </div>
+                    <div>
+                      <strong>Range:</strong> {formatRange(meta)}
+                    </div>
+                  </div>
+                )}
+              </AccordionSection>
 
+              <AccordionSection
+                id="search"
+                title="2) Search"
+                subtitle="Keyword + sender + date range. Click a hit to jump to that exact message in the file viewer."
+                disabled={!canSearch}
+                open={openSections.has("search")}
+                onToggle={() => toggleSection("search")}
+              >
         <div className="searchHeaderRow">
           <label className="activeDatasetLabel" style={{ color: "var(--muted)" }}>
             Active dataset:
@@ -835,110 +1054,141 @@ export function HtmlSearchApp() {
           </label>
         </div>
 
-        <div
-          className="searchGrid"
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            search(0);
+          }}
         >
-          <input
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            placeholder="Search text (plain text / substring)"
-            disabled={!canSearch}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: "var(--surface-2)",
-              color: "var(--foreground)",
-            }}
-          />
-          <input
-            value={exclude}
-            onChange={(e) => setExclude(e.target.value)}
-            placeholder='Exclude text (e.g. "malappuram")'
-            disabled={!canSearch}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: "var(--surface-2)",
-              color: "var(--foreground)",
-            }}
-          />
-          <select
-            value={sender}
-            onChange={(e) => setSender(e.target.value)}
-            disabled={!canSearch}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: "var(--surface-2)",
-              color: "var(--foreground)",
-            }}
-          >
-            <option value="">All senders</option>
-            {senders.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-          <select
-            value={matchMode}
-            onChange={(e) => setMatchMode((e.target.value as "substring" | "word") ?? "substring")}
-            disabled={!canSearch}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: "var(--surface-2)",
-              color: "var(--foreground)",
-            }}
-          >
-            <option value="substring">Substring match</option>
-            <option value="word">Whole word only</option>
-          </select>
-          <input
-            type="date"
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            disabled={!canSearch}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: "var(--surface-2)",
-              color: "var(--foreground)",
-            }}
-          />
-          <input
-            type="date"
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-            disabled={!canSearch}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: "var(--surface-2)",
-              color: "var(--foreground)",
-            }}
-          />
-          <button
-            onClick={() => search(0)}
-            disabled={!canSearch || searching}
-            style={{
-              padding: "10px 12px",
-              borderRadius: 10,
-              border: "1px solid var(--border)",
-              background: searching ? "var(--surface-2)" : "#101826",
-              color: searching ? "var(--muted)" : "var(--foreground)",
-              cursor: searching ? "not-allowed" : "pointer",
-            }}
-          >
-            {searching ? "Searching…" : "Search"}
-          </button>
-        </div>
+          <div className="searchGrid">
+            <input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Keyword(s)"
+              disabled={!canSearch}
+              style={{
+                padding: "12px 12px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+                fontSize: 16,
+              }}
+            />
+            <input
+              value={exclude}
+              onChange={(e) => setExclude(e.target.value)}
+              placeholder='Exclude text (optional)'
+              disabled={!canSearch}
+              style={{
+                padding: "12px 12px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+                fontSize: 16,
+              }}
+            />
+            <select
+              value={sender}
+              onChange={(e) => setSender(e.target.value)}
+              disabled={!canSearch}
+              style={{
+                padding: "12px 12px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+                fontSize: 16,
+              }}
+            >
+              <option value="">All senders</option>
+              {senders.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+            <select
+              value={matchMode}
+              onChange={(e) => setMatchMode((e.target.value as "substring" | "word") ?? "substring")}
+              disabled={!canSearch}
+              style={{
+                padding: "12px 12px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+                fontSize: 16,
+              }}
+            >
+              <option value="substring">Substring match</option>
+              <option value="word">Whole word only</option>
+            </select>
+            <input
+              type="date"
+              value={from}
+              onChange={(e) => setFrom(e.target.value)}
+              disabled={!canSearch}
+              style={{
+                padding: "12px 12px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+                fontSize: 16,
+              }}
+            />
+            <input
+              type="date"
+              value={to}
+              onChange={(e) => setTo(e.target.value)}
+              disabled={!canSearch}
+              style={{
+                padding: "12px 12px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+                fontSize: 16,
+              }}
+            />
+            <button
+              type="submit"
+              disabled={!canSearch || searching}
+              style={{
+                padding: "12px 14px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: searching ? "var(--surface-2)" : "#101826",
+                color: searching ? "var(--muted)" : "var(--foreground)",
+                cursor: searching ? "not-allowed" : "pointer",
+                minHeight: 44,
+              }}
+            >
+              {searching ? "Searching…" : "Search"}
+            </button>
+          </div>
+
+          <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <button
+              type="button"
+              onClick={clearSearch}
+              disabled={!canSearch}
+              style={{
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: "1px solid var(--border)",
+                background: "var(--surface-2)",
+                color: "var(--foreground)",
+                cursor: "pointer",
+                minHeight: 44,
+              }}
+            >
+              Clear filters
+            </button>
+          </div>
+        </form>
 
         {searchError && (
           <p style={{ margin: "10px 0 0", color: "#b00020" }}>{searchError}</p>
@@ -968,7 +1218,7 @@ export function HtmlSearchApp() {
             >
               Results (click to view)
             </div>
-            <div style={{ maxHeight: 420, overflow: "auto" }}>
+            <div className="resultsListScroll">
               {results.map((r) => {
                 const active = r.key === selectedKey;
                 return (
@@ -979,15 +1229,19 @@ export function HtmlSearchApp() {
                       display: "block",
                       width: "100%",
                       textAlign: "left",
-                      padding: "10px 12px",
+                      padding: "12px 12px",
                       border: "none",
                       borderBottom: "1px solid rgba(36,49,64,0.65)",
                       background: active ? "rgba(106, 166, 255, 0.12)" : "transparent",
                       color: "var(--foreground)",
                       cursor: "pointer",
+                      minHeight: 56,
                     }}
                   >
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                      {typeof r.messageIndex === "number" ? (
+                        <span style={{ color: "var(--muted)" }}>#{r.messageIndex}</span>
+                      ) : null}
                       <strong>{r.sender}</strong>
                       {searchScope === "all" && (
                         <span style={{ color: "var(--muted)" }}>{r.fileName}</span>
@@ -1043,6 +1297,9 @@ export function HtmlSearchApp() {
                   }}
                   className="selectedHeader"
                 >
+                  {typeof selected.messageIndex === "number" ? (
+                    <span style={{ color: "var(--muted)" }}>#{selected.messageIndex}</span>
+                  ) : null}
                   <strong>{selected.sender}</strong>
                   {searchScope === "all" && (
                     <span style={{ color: "var(--muted)" }}>{selected.fileName}</span>
@@ -1051,8 +1308,7 @@ export function HtmlSearchApp() {
                   <button
                     className="openAtButton"
                     onClick={() => {
-                      setReadableAnchorId(selected.id);
-                      setView("readable");
+                      onSelectResult(selected);
                     }}
                     style={{
                       padding: "6px 10px",
@@ -1064,6 +1320,19 @@ export function HtmlSearchApp() {
                     }}
                   >
                     Open file at message
+                  </button>
+                  <button
+                    onClick={() => jumpToParsed(selected.id)}
+                    style={{
+                      padding: "6px 10px",
+                      borderRadius: 10,
+                      border: "1px solid var(--border)",
+                      background: "var(--surface-2)",
+                      color: "var(--foreground)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    Jump in Parsed list
                   </button>
                 </div>
 
@@ -1121,7 +1390,187 @@ export function HtmlSearchApp() {
             </div>
           </div>
         )}
-      </section>
+        </AccordionSection>
+
+        <AccordionSection
+          id="viewer"
+          title="3) File Viewer"
+          subtitle={
+            fileId && meta
+              ? `${meta.originalName} · ${meta.messageCount} messages`
+              : "Open a dataset to view messages"
+          }
+          disabled={!fileId}
+          open={openSections.has("viewer")}
+          onToggle={() => toggleSection("viewer")}
+        >
+          {!fileId ? (
+            <div style={{ color: "var(--muted)" }}>Upload or select a dataset to view it.</div>
+          ) : (
+            <>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {(
+                  [
+                    { key: "readable", label: "File View" },
+                    { key: "parsed", label: "Parsed (scrollable)" },
+                    { key: "original", label: "Original HTML" },
+                  ] as const
+                ).map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => setView(t.key)}
+                    style={{
+                      padding: "8px 12px",
+                      borderRadius: 10,
+                      border: "1px solid var(--border)",
+                      background:
+                        view === t.key ? "rgba(106, 166, 255, 0.12)" : "var(--surface-2)",
+                      color: "var(--foreground)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
+
+              {view === "readable" && (
+                <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ color: "var(--muted)" }}>TOC mode:</span>
+                  {(
+                    [
+                      { key: "filtered", label: "Filtered" },
+                      { key: "full", label: "Full-file" },
+                    ] as const
+                  ).map((m) => (
+                    <button
+                      key={m.key}
+                      onClick={() => setTocMode(m.key)}
+                      style={{
+                        padding: "6px 10px",
+                        borderRadius: 10,
+                        border: "1px solid var(--border)",
+                        background:
+                          tocMode === m.key ? "rgba(106, 166, 255, 0.12)" : "var(--surface-2)",
+                        color: "var(--foreground)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {m.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+
+              <div style={{ marginTop: 12 }}>
+                {view === "readable" && (
+                  <iframe
+                    title="File View"
+                    sandbox="allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+                    style={{
+                      width: "100%",
+                      height: "min(70vh, 540px)",
+                      border: "1px solid var(--border)",
+                      borderRadius: 12,
+                      background: "var(--surface-2)",
+                    }}
+                    src={readableIframeSrc ?? "about:blank"}
+                  />
+                )}
+
+                {view === "parsed" && (
+                  <div
+                    ref={parsedListRef}
+                    style={{
+                      border: "1px solid var(--border)",
+                      borderRadius: 12,
+                      background: "var(--surface-2)",
+                      maxHeight: "min(70vh, 540px)",
+                      overflow: "auto",
+                      padding: 10,
+                    }}
+                  >
+                    {orderedMessages.map((m, idx) => (
+                      <div
+                        key={m.id}
+                        id={`pm-${m.id}`}
+                        style={{
+                          padding: "10px 10px",
+                          borderRadius: 12,
+                          border: "1px solid rgba(36,49,64,0.65)",
+                          marginBottom: 10,
+                          background: "transparent",
+                        }}
+                      >
+                        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", color: "var(--muted)" }}>
+                          <span>#{idx + 1}</span>
+                          <strong style={{ color: "var(--foreground)" }}>{m.sender}</strong>
+                          <span>{m.timestampRaw || ""}</span>
+                        </div>
+                        <div style={{ marginTop: 6, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>
+                          <HighlightedText text={m.text} query={q} />
+                        </div>
+                      </div>
+                    ))}
+                    {orderedMessages.length === 0 && (
+                      <div style={{ padding: 12, color: "var(--muted)" }}>No parsed messages loaded.</div>
+                    )}
+                  </div>
+                )}
+
+                {view === "original" && (
+                  <>
+                    {originals.length > 1 && (
+                      <div style={{ marginBottom: 10 }}>
+                        <label
+                          style={{
+                            color: "var(--muted)",
+                            display: "flex",
+                            gap: 8,
+                            alignItems: "center",
+                            flexWrap: "wrap",
+                          }}
+                        >
+                          Original file:
+                          <select
+                            value={String(originalIndex)}
+                            onChange={(e) => setOriginalIndex(Number(e.target.value) || 0)}
+                            style={{
+                              padding: "8px 10px",
+                              borderRadius: 10,
+                              border: "1px solid var(--border)",
+                              background: "var(--surface-2)",
+                              color: "var(--foreground)",
+                            }}
+                          >
+                            {originals.map((o, idx) => (
+                              <option key={o.name + idx} value={String(idx)}>
+                                {o.name}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      </div>
+                    )}
+                    <iframe
+                      title="Original HTML"
+                      sandbox="allow-popups allow-popups-to-escape-sandbox allow-top-navigation-by-user-activation"
+                      style={{
+                        width: "100%",
+                        height: "min(70vh, 540px)",
+                        border: "1px solid var(--border)",
+                        borderRadius: 12,
+                        background: "#fff",
+                      }}
+                      src={originalIframeSrc ?? "about:blank"}
+                    />
+                  </>
+                )}
+              </div>
+            </>
+          )}
+        </AccordionSection>
+      </div>
 
       <footer style={{ padding: "20px 0", color: "var(--muted)" }}>
         <small>
@@ -1226,6 +1675,18 @@ export function HtmlSearchApp() {
         @media (max-width: 980px) {
           .resultsGrid {
             grid-template-columns: 1fr;
+          }
+        }
+
+        .resultsListScroll {
+          max-height: 420px;
+          overflow: auto;
+          -webkit-overflow-scrolling: touch;
+        }
+
+        @media (max-width: 600px) {
+          .resultsListScroll {
+            max-height: 55vh;
           }
         }
       `}</style>
